@@ -168,10 +168,7 @@ def attach_routes(
     async def health_check() -> HealthResponse:
         """Simple health check."""
         logger.debug(f"Health check requested for bot {bot_config.name}")
-        return HealthResponse(
-            status="healthy",
-            timestamp=datetime.utcnow().isoformat()
-        )
+        return HealthResponse(status="healthy", timestamp=datetime.utcnow().isoformat())
 
     logger.info(f"Routes attached successfully for bot {bot_config.name}")
     return router

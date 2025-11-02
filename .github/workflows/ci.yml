@@ -23,7 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.13", "3.14.0-alpha - 3.14.0"]
+        python-version: ["3.13"]
 
     steps:
     - uses: actions/checkout@v4
@@ -55,8 +55,7 @@ jobs:
 
     - name: Run tests with coverage
       run: |
-        source .venv/bin/activate
-        pytest --cov=blockether_foundation --cov-report=xml --cov-report=html --cov-report=term tests/
+        uv run pytest --cov=blockether_foundation --cov-report=xml --cov-report=html --cov-report=term tests/
 
     - name: Upload coverage to Codecov
       if: matrix.python-version == '3.13' && matrix.os == 'ubuntu-latest'
@@ -111,18 +110,15 @@ jobs:
 
     - name: Check code formatting
       run: |
-        source .venv/bin/activate
-        poe format-check
+        uv run poe format-check
 
     - name: Run linter
       run: |
-        source .venv/bin/activate
-        poe lint
+        uv run poe lint
 
     - name: Type checking
       run: |
-        source .venv/bin/activate
-        poe type-check
+        uv run poe type-check
 
   build:
     name: Build & Verify Package

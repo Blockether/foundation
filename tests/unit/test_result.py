@@ -186,6 +186,7 @@ class TestResult:
     @pytest.mark.unit
     def test_and_then_success(self):
         """Test and_then chains Result-producing operations."""
+
         def divide(x: int) -> Result[int, ResultError]:
             if x == 0:
                 return Result.Err(ResultError("division by zero"))
@@ -199,6 +200,7 @@ class TestResult:
     @pytest.mark.unit
     def test_and_then_error(self):
         """Test and_then propagates error on Err result."""
+
         def divide(x: int) -> Result[int, ResultError]:
             return Result.Ok(10 // x)
 
@@ -211,6 +213,7 @@ class TestResult:
     @pytest.mark.unit
     def test_and_then_err_from_callback(self):
         """Test and_then returns Err from callback."""
+
         def divide(x: int) -> Result[int, ResultError]:
             if x == 0:
                 return Result.Err(ResultError("division by zero"))
@@ -269,6 +272,7 @@ class TestResult:
     @pytest.mark.unit
     def test_complex_chaining(self):
         """Test complex method chaining scenarios."""
+
         def parse_int(s: str) -> Result[int, ResultError]:
             try:
                 return Result.Ok(int(s))
@@ -281,17 +285,12 @@ class TestResult:
             return Result.Ok(100.0 / x)
 
         # Success chain
-        result = (Result.Ok("50")
-                 .and_then(parse_int)
-                 .and_then(divide)
-                 .map(lambda x: round(x, 2)))
+        result = Result.Ok("50").and_then(parse_int).and_then(divide).map(lambda x: round(x, 2))
         assert result.is_ok()
         assert result.unwrap() == 2.0
 
         # Error chain
-        result = (Result.Ok("invalid")
-                 .and_then(parse_int)
-                 .and_then(divide))
+        result = Result.Ok("invalid").and_then(parse_int).and_then(divide)
         assert result.is_err()
         result_err_str = str(result.unwrap_err())
         assert "Invalid number" in result_err_str
@@ -328,8 +327,5 @@ class TestResult:
         assert result.unwrap().value == "test"
 
         # Test chaining with different types
-        result = (Result.Ok("hello")
-                 .map(len)
-                 .map(lambda x: x * 2)
-                 .map(str))
+        result = Result.Ok("hello").map(len).map(lambda x: x * 2).map(str)
         assert result.unwrap() == "10"

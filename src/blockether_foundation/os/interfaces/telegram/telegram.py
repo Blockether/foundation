@@ -95,7 +95,9 @@ class Telegram(BaseInterface):
         # Create individual routers for each bot configuration
         for bot_config in self.bot_configs:
             logger.info(f"Creating router for bot: {bot_config.name}")
-            bot_router = APIRouter(prefix=f"/{bot_config.name}", tags=[f"telegram-{bot_config.name}"])
+            bot_router = APIRouter(
+                prefix=f"/{bot_config.name}", tags=[f"telegram-{bot_config.name}"]
+            )
 
             attach_routes(
                 router=bot_router,
@@ -122,12 +124,15 @@ class Telegram(BaseInterface):
                         "has_webhook_secret": bool(config.webhook_secret),
                         "max_concurrent_updates": config.max_concurrent_updates,
                         "executor_timeout": config.executor_timeout,
-                        "has_access_restrictions": bool(config.allowlist_user_ids) or bool(config.denylist_user_ids)
+                        "has_access_restrictions": bool(config.allowlist_user_ids)
+                        or bool(config.denylist_user_ids),
                     }
                     for config in self.bot_configs
                 ],
-                "executor_type": type(self.agent or self.team or self.workflow).__name__ if (self.agent or self.team or self.workflow) else None,
-                "timestamp": datetime.utcnow().isoformat()
+                "executor_type": type(self.agent or self.team or self.workflow).__name__
+                if (self.agent or self.team or self.workflow)
+                else None,
+                "timestamp": datetime.utcnow().isoformat(),
             }
 
         logger.info(f"FastAPI router created with {len(self.bot_configs)} bot endpoints")

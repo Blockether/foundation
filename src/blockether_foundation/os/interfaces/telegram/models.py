@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 class BotConfig(BaseModel):
     """Configuration for a Telegram bot."""
+
     name: str
     token: str
     webhook_secret: str | None = None
@@ -24,6 +25,7 @@ class BotConfig(BaseModel):
 
 class Update(BaseModel):
     """Simplified Telegram update model for basic validation."""
+
     update_id: int
     message: dict[str, Any] | None = None
     callback_query: dict[str, Any] | None = None
@@ -31,6 +33,7 @@ class Update(BaseModel):
 
 class WebhookResponse(BaseModel):
     """Response for webhook processing confirmation."""
+
     status: Literal["ok", "error"]
     update_id: int
     processed_at: str
@@ -38,6 +41,7 @@ class WebhookResponse(BaseModel):
 
 class StatusResponse(BaseModel):
     """Simple status response for a bot."""
+
     status: Literal["active", "inactive", "error"]
     bot_name: str
     timestamp: str
@@ -45,5 +49,6 @@ class StatusResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     """Simple health check response."""
+
     status: Literal["healthy", "unhealthy"]
     timestamp: str
