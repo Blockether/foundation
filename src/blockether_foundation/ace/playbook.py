@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import random
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from textwrap import dedent
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
+from .models.base import BaseModelFilePersistable
 from .models.playbook import (
     BaseSectionEntry,
     GroundTruth,
@@ -16,8 +19,10 @@ from .models.playbook import (
     SectionEntry,
 )
 
+__SEED_DETERMINISTIC_COMPONENT__ = 29
 
-class Playbook(BaseModel):
+
+class Playbook(BaseModelFilePersistable):
     name: str = Field(default="Default Agent Playbook", description="Name of the playbook")
 
     overview: PlaybookHighLevelOverview = PlaybookHighLevelOverview(
@@ -55,6 +60,10 @@ class Playbook(BaseModel):
             pass
         return self
 
+    def _entry_id(self, entry: SectionEntry) -> str:
+        rand = random.SystemRandom(__SEED_DETERMINISTIC_COMPONENT__)
+        return base64.urlsafe_b64encode(rand.randbytes(6)).decode()
+
     def apply_deltas(self, deltas: list[PlaybookEntryDelta]) -> Playbook:
         if not deltas:
             return self
@@ -72,7 +81,7 @@ class Playbook(BaseModel):
         return self.ground_truths
 
     def _post_init_(self):
-        self._entries_by_ids: dict[int, SectionEntry] = {
+        self._entries_by_ids: dict[str, SectionEntry] = {
             entry.id: entry for entry in self._all_entries()
         }
 

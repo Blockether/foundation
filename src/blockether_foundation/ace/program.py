@@ -30,7 +30,7 @@ from agno.workflow import Condition, Step, StepInput, StepOutput, Workflow
 from openai.types import ReasoningEffort
 from pydantic import BaseModel, Field
 
-from .models.base import PydanticFilePersistable
+from .models.base import BaseModelFilePersistable
 from .models.program.analysis import AnalysisStepOutput, ProgramAnalysis, ProgramMode
 from .playbook import Playbook
 
@@ -52,7 +52,7 @@ ACEGenerator = Agent(
 )
 
 
-class AceProgram(PydanticFilePersistable):
+class AceProgram(BaseModelFilePersistable):
     generator_model: Model = Field(description="Model used for generation in the ACE program")
     premade_playbook: Playbook | None = Field(
         default=None, description="Optional premade playbook to use in the ACE program"

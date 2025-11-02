@@ -1,4 +1,5 @@
 import json
+import pickle
 
 from pydantic import BaseModel, Field
 
@@ -15,13 +16,23 @@ class ChainOfThoughts(BaseModel):
     )
 
 
-class PydanticFilePersistable(BaseModel):
+class BaseModelFilePersistable(BaseModel):
     @classmethod
-    def from_file(cls, file_path: str) -> "PydanticFilePersistable":
+    def from_json_file(cls, file_path: str) -> "BaseModelFilePersistable":
         with open(file_path) as f:
             data = json.load(f)
         return cls(**data)
 
-    def save_to_file(self, file_path: str) -> None:
+    def to_json_file(self, file_path: str) -> None:
         with open(file_path, "w") as f:
             json.dump(self.model_dump(), f, indent=4)
+
+    @classmethod
+    def from_pickle_file(cls, file_path: str) -> "BaseModelFilePersistable":
+        with open(file_path, "rb") as f:
+            data = pickle.load(f)
+        return cls(**data)
+
+    def to_pickle_file(self, file_path: str) -> None:
+        with open(file_path, "wb") as f:
+            pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
