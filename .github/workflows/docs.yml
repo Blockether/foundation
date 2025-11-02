@@ -1,0 +1,93 @@
+name: Documentation
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - '**.md'
+      - 'mkdocs.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - '**.md'
+      - 'mkdocs.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build-docs:
+    name: Build Documentation
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+
+    - name: Cache uv
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/uv
+        key: ${{ runner.os }}-uv-docs-${{ hashFiles('pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-uv-docs-
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v4
+
+    - name: Install documentation dependencies
+      run: |
+        uv pip install mkdocs mkdocs-material mkdocstrings[python]
+
+    - name: Check for mkdocs configuration
+      id: check_config
+      run: |
+        if [ -f "mkdocs.yml" ]; then
+          echo "config_exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "config_exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build documentation
+      if: steps.check_config.outputs.config_exists == 'true'
+      run: mkdocs build --strict
+
+    - name: Upload documentation artifacts
+      if: steps.check_config.outputs.config_exists == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: documentation-${{ github.run_id }}
+        path: ./site
+        retention-days: 7
+
+    - name: Deploy to GitHub Pages
+      if: |
+        steps.check_config.outputs.config_exists == 'true' &&
+        github.ref == 'refs/heads/main' &&
+        github.event_name == 'push'
+      uses: peaceiris/actions-gh-pages@v4
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./site
+        cname: docs.blockether.org
+      continue-on-error: true
+
+    - name: Warn if mkdocs not configured
+      if: steps.check_config.outputs.config_exists == 'false'
+      run: |
+        echo "::warning::No mkdocs.yml found. Documentation build skipped."
+        echo "To enable documentation builds, add a mkdocs.yml configuration file."

@@ -1,0 +1,144 @@
+site_name: Blockether Foundation
+site_description: Documentation for Blockether Foundation
+site_author: Blockether
+site_url: https://blockether.com
+
+# Repository
+repo_name: blockether-foundation
+repo_url: https://github.com/blockether/blockether-foundation
+
+# Theme
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - search.highlight
+    - search.share
+  palette:
+    - scheme: default
+      primary: black
+      accent: yellow
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: black
+      accent: yellow
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+# # Navigation
+# nav:
+#   - Home: index.md
+#   - Getting Started:
+#     - Installation: getting-started/installation.md
+#     - Quick Start: getting-started/quickstart.md
+#     - Basic Concepts: getting-started/concepts.md
+#   - API Reference:
+#     - Overview: api/overview.md
+#     - Core: api/core.md
+#     - Models: api/models.md
+#     - Utilities: api/utilities.md
+#   - Guides:
+#     - Examples: guides/examples.md
+#     - Best Practices: guides/best-practices.md
+#     - Troubleshooting: guides/troubleshooting.md
+#   - Development:
+#     - Contributing: development/contributing.md
+#     - Testing: development/testing.md
+#     - Architecture: development/architecture.md
+
+# Plugins
+plugins:
+  - search:
+      lang: en
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            merge_init_into_class: true
+  - git-revision-date-localized:
+      type: timeago
+      enable_creation_date: true
+
+# Extensions
+markdown_extensions:
+  - admonition
+  - codehilite:
+      guess_lang: false
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.magiclink:
+      normalize_issue_symbols: true
+      repo_url_shorthand: true
+      user: blockether
+      repo: blockether-foundation
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets:
+      auto_append:
+        - includes/mkdocs.md
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+      combine_header_slug: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+# Extra CSS and JS
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+# Extra
+extra:
+  analytics:
+    provider: google
+    property: G-XXXXXXXXXX
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/blockether
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/blockether-foundation/
+
+# Watch configuration
+watch:
+  - src

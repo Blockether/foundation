@@ -96,7 +96,7 @@ select = [
     "UP", # pyupgrade
 ]
 ignore = [
-    "E501",  # line too long 
+    "E501",  # line too long
     "B008",  # do not perform function calls in argument defaults
 ]
 
@@ -104,7 +104,7 @@ ignore = [
 "__init__.py" = ["F401"]  # Allow unused imports in __init__.py
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.13"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
