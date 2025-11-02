@@ -13,6 +13,7 @@ jobs:
   test:
     name: Pre-release Tests
     runs-on: ubuntu-latest
+    environment: test
     permissions:
       contents: read
 

@@ -28,6 +28,7 @@ permissions:
 jobs:
   build-docs:
     name: Build Documentation
+    environment: test
     runs-on: ubuntu-latest
 
     steps:
