@@ -9,6 +9,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  PYTHON_VERSION: "3.13"
+  BLOCKETHER_LLM_API_KEY: ${{ secrets.BLOCKETHER_LLM_API_KEY }}
+  BLOCKETHER_LLM_API_BASE_URL: ${{ secrets.BLOCKETHER_LLM_API_BASE_URL }}
+  BLOCKETHER_LLM_DEFAULT_MODEL: ${{ secrets.BLOCKETHER_LLM_DEFAULT_MODEL }}
+
 jobs:
   test:
     name: Pre-release Tests
