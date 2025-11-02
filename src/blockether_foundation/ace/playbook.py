@@ -18,14 +18,11 @@ from .models.playbook import (
 
 
 class Playbook(BaseModel):
-    counter: int = Field(default=0, description="Internal counter for generating unique IDs")
-
     name: str = Field(default="Default Agent Playbook", description="Name of the playbook")
 
     overview: PlaybookHighLevelOverview = PlaybookHighLevelOverview(
         description="This playbook provides a structured set of hypotheses, guidelines, and best practices to create agents that can dynamically adapt their capabilities based on <USER_REQUEST> at hand. It aims to enhance agent performance by leveraging domain knowledge and proven patterns.",
     )
-
     policies: list[str] = Field(
         default_factory=list,
         description="List of static policies to enforce in the ACE program. These policies are strictly followed and cannot be overriden during execution.",

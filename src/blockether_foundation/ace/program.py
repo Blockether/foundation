@@ -278,7 +278,7 @@ class AceProgram(PydanticFilePersistable):
                 self.generator_model, effort=self._reasoning_effort_from_analysis(previous_step)
             )
             stateless_executor = self._stateless_agno_executor(
-                executor=executor, output_schema=executor.output_schema, model=model_with_reasoning
+                executor=executor, output_schema=GeneratorOutput, model=model_with_reasoning
             )
             response = stateless_executor.run(previous_step.next_context)
 

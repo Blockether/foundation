@@ -70,8 +70,8 @@ class PlaybookHighLevelOverview(BaseModel):
 
 
 class BaseSectionEntry(BaseModel):
-    id: int = Field(
-        description="Unique identifier for the entry. Must be unique within the entire system."
+    id: str = Field(
+        description="Unique identifier for the entry. Must be unique within the entire system.",
     )
     section: str = Field(
         description="Section name that categorizes this entry. Used for grouping related entries."
@@ -161,6 +161,12 @@ class GroundTruth(BaseSectionEntry):
 #     )
 
 
+# class ConversationContext(BaseSectionEntry):
+#     previous_topic: str = Field(description="Description of the previous topic of conversation")
+
+#     current_topic: str = Field(description="Description of the current topic of conversation")
+
+
 # class Pattern(BaseEntry):
 #     section: str = "Patterns"
 #     order: int = 3
@@ -182,3 +188,8 @@ class GroundTruth(BaseSectionEntry):
 
 
 type SectionEntry = GroundTruth
+
+
+# Use cases
+
+##
