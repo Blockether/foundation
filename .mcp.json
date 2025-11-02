@@ -1,0 +1,59 @@
+{
+    "mcpServers": {
+        "web-search-prime": {
+            "type": "http",
+            "url": "https://api.z.ai/api/mcp/web_search_prime/mcp",
+            "headers": {
+                "Authorization": "Bearer ${Z_AI_API_KEY}"
+            }
+        },
+        "serena": {
+            "type": "stdio",
+            "command": "uvx",
+            "args": [
+                "--from",
+                "git+https://github.com/oraios/serena",
+                "serena",
+                "start-mcp-server",
+                "--context",
+                "ide-assistant",
+                "--project",
+                "."
+            ],
+            "env": {}
+        },
+        "cclsp": {
+            "type": "stdio",
+            "command": "npx",
+            "args": [
+                "cclsp@latest"
+            ],
+            "env": {
+                "CCLSP_CONFIG_PATH": ".claude/cclsp.json"
+            }
+        },
+        "agno": {
+            "type": "http",
+            "url": "https://docs.agno.com/mcp"
+        },
+        "shadcn": {
+            "command": "npx",
+            "args": [
+                "shadcn@latest",
+                "mcp"
+            ]
+        },
+        "zai-mcp-server": {
+            "type": "stdio",
+            "command": "npx",
+            "args": [
+                "-y",
+                "@z_ai/mcp-server"
+            ],
+            "env": {
+                "Z_AI_API_KEY": "${Z_AI_API_KEY}",
+                "Z_AI_MODE": "ZAI"
+            }
+        }
+    }
+}
