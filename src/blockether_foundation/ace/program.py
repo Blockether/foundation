@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import copy
 import inspect
-from math import log
 import os
 from collections.abc import Callable
 from re import split
 from textwrap import dedent
-from typing import Any, TypeVar, cast
+from typing import Any, cast
 
 from agno.agent import Agent, AgentSession
 from agno.db.in_memory import InMemoryDb
@@ -26,12 +25,13 @@ from agno.run.agent import RunInput
 from agno.session import TeamSession
 from agno.team import Team
 from agno.utils.log import log_debug
-from agno.workflow import Condition, Step, StepInput, StepOutput, Workflow
+from agno.workflow import Step, StepInput, StepOutput, Workflow
 from openai.types import ReasoningEffort
 from pydantic import BaseModel, Field
 
 from .models.base import BaseModelFilePersistable
 from .models.program.analysis import AnalysisStepOutput, ProgramAnalysis, ProgramMode
+from .models.program.generator import GeneratorOutput
 from .playbook import Playbook
 
 type UserId = str | None
@@ -53,7 +53,9 @@ ACEGenerator = Agent(
 
 
 class AceProgram(BaseModelFilePersistable):
-    generator_model: Model = Field(description="Model used for generation in the ACE program")
+    generator_model: Model = Field(
+        description="Model used for generation in the ACE program"
+    )
     premade_playbook: Playbook | None = Field(
         default=None, description="Optional premade playbook to use in the ACE program"
     )
@@ -107,9 +109,11 @@ class AceProgram(BaseModelFilePersistable):
             if self.enable_consensus
             else "N/A"
         )
-        return dedent(f"""<CONSENSUS>
+        return dedent(
+            f"""<CONSENSUS>
             <CONSENSUS_AVAILABLE_MODELS>{models_list}</CONSENSUS_AVAILABLE_MODELS>
-        </CONSENSUS>""")
+        </CONSENSUS>"""
+        )
 
     def change_mode(self, new_mode: ProgramMode) -> AceProgram:
         """
@@ -128,7 +132,8 @@ class AceProgram(BaseModelFilePersistable):
         self, executor: Agent | Team, input_as_str: str | None, playbook: Playbook
     ) -> AnalysisStepOutput:
         user_and_playbook_content = f"{input_as_str}{playbook.to_markdown()}"
-        full_phase_input = dedent(f"""{user_and_playbook_content}
+        full_phase_input = dedent(
+            f"""{user_and_playbook_content}
 
 <PHASE>
     <PHASE_NAME>Analysis</PHASE_NAME>
@@ -152,7 +157,8 @@ class AceProgram(BaseModelFilePersistable):
     <METADATA>
         {self._consensus_markdown()}
     </METADATA>
-</PHASE>""")
+</PHASE>"""
+        )
         response = executor.run(stream=False, input=full_phase_input)
         log_debug(f"Analysis step response: {response.content}")
 
@@ -199,7 +205,8 @@ class AceProgram(BaseModelFilePersistable):
 
         if isinstance(stateless_executor, Team) and isinstance(executor, Team):
             stateless_executor.members = [
-                self._stateless_agno_executor(member, output_schema) for member in executor.members
+                self._stateless_agno_executor(member, output_schema)
+                for member in executor.members
             ]
 
         return stateless_executor
@@ -207,7 +214,9 @@ class AceProgram(BaseModelFilePersistable):
     def _analysis_step(self, executor: Agent | Team, playbook: Playbook) -> Step:
         def step_executor(input: StepInput) -> StepOutput:
             input_as_str = input.get_input_as_string()
-            stateless_executor = self._stateless_agno_executor(executor, ProgramAnalysis)
+            stateless_executor = self._stateless_agno_executor(
+                executor, ProgramAnalysis
+            )
 
             response = self._predict_run_analysis(
                 executor=stateless_executor,
@@ -228,7 +237,9 @@ class AceProgram(BaseModelFilePersistable):
             executor=step_executor,
         )
 
-    def _model_with_reasoning(self, model: Model | str, effort: ReasoningEffort | None) -> Model:
+    def _model_with_reasoning(
+        self, model: Model | str, effort: ReasoningEffort | None
+    ) -> Model:
         model_with_reasoning = self._resolve_model(model)
 
         if not effort:
@@ -240,7 +251,9 @@ class AceProgram(BaseModelFilePersistable):
             )
             return model_with_reasoning
 
-        log_debug(f"Setting reasoning effort '{effort}' for model '{model_with_reasoning.name}'")
+        log_debug(
+            f"Setting reasoning effort '{effort}' for model '{model_with_reasoning.name}'"
+        )
 
         setattr(model_with_reasoning, "reasoning", {"effort": effort})  # noqa: B010
 
@@ -273,16 +286,27 @@ class AceProgram(BaseModelFilePersistable):
 
     def _generator_step(self, executor: Agent | Team, playbook: Playbook) -> Step:
         def step_executor(input: StepInput) -> StepOutput:
-            previous_step: AnalysisStepOutput = cast(AnalysisStepOutput, input.input)
+            previous_step: AnalysisStepOutput = cast(
+                AnalysisStepOutput, input.previous_step_content
+            )
             model_with_reasoning = self._model_with_reasoning(
-                self.generator_model, effort=self._reasoning_effort_from_analysis(previous_step)
+                self.generator_model,
+                effort=self._reasoning_effort_from_analysis(previous_step),
             )
             stateless_executor = self._stateless_agno_executor(
-                executor=executor, output_schema=GeneratorOutput, model=model_with_reasoning
+                executor=executor,
+                output_schema=GeneratorOutput,
+                model=model_with_reasoning,
             )
-            response = stateless_executor.run(previous_step.next_context)
+            response = stateless_executor.run(previous_step.next_context, stream=False)
 
-            return response
+            return StepOutput(
+                content=response.content,
+                images=input.images,
+                audio=input.audio,
+                videos=input.videos,
+                files=input.files,
+            )
 
         return Step(
             name="Generation Step",
@@ -331,7 +355,9 @@ class AceProgram(BaseModelFilePersistable):
 
     def pre_hook(
         self,
-    ) -> Callable[[Agent | Team, RunInput, AgentSession | TeamSession, UserId, DebugMode], None]:
+    ) -> Callable[
+        [Agent | Team, RunInput, AgentSession | TeamSession, UserId, DebugMode], None
+    ]:
         def hook(
             agent: Agent | Team,
             run_input: RunInput,
@@ -346,7 +372,9 @@ class AceProgram(BaseModelFilePersistable):
 
             self._set_session_playbook(session, playbook)
 
-            user_request_content = f"\n\n<USER_REQUEST>{run_input.input_content}</USER_REQUEST>"
+            user_request_content = (
+                f"\n\n<USER_REQUEST>{run_input.input_content}</USER_REQUEST>"
+            )
             input_content = (
                 "<PLAYBOOK> defines the execution guidelines and context. <PHASE> if present specifies which decomposed sub-problem or workflow step you are currently addressing."
                 "Using the <PLAYBOOK> and considering the <PHASE>, fulfill the <USER_REQUEST>:"
@@ -407,7 +435,9 @@ class AceProgram(BaseModelFilePersistable):
         playbook = session_data.get("playbook")
 
         if not playbook:
-            log_debug("No playbook found in session data. Using premade or default playbook.")
+            log_debug(
+                "No playbook found in session data. Using premade or default playbook."
+            )
 
             if not self.premade_playbook:
                 log_debug("No premade playbook provided. Using default empty playbook.")
