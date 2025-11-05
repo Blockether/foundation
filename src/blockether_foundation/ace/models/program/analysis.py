@@ -66,14 +66,10 @@ class ProgramExpectedUserSpecifiedOutcome(ChainOfThoughts):
 
 class MathPythonEquations(ChainOfThoughts):
     python_snippet: str = Field(
-        description="Python snippet which will evaluate to the solution of the given equation"
+        description="Python snippet which will evaluate to the solution of the given equation. Prefer using SymPy library for symbolic mathematics."
     )
     equation: str = Field(
         description="The equation described in natural mathematical language (symbols)"
-    )
-    libraries: list[str] = Field(
-        default_factory=list,
-        description="List of python libraries required to run the snippet",
     )
 
 

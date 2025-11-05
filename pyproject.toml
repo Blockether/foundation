@@ -12,7 +12,6 @@ classifiers = [
 ]
 
 dependencies = [
-    "agno>=2.2.1",
     "fastapi>=0.120.0",
     "llm-sandbox>=0.3.24",
     "model2vec>=0.7.0",
@@ -21,6 +20,7 @@ dependencies = [
     "scikit-learn>=1.5.0",
     "sqlalchemy>=2.0.44",
     "python-telegram-bot>=21.3",
+    "agno>=2.2.8",
 ]
 
 [project.optional-dependencies]

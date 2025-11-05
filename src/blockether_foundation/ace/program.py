@@ -53,9 +53,7 @@ ACEGenerator = Agent(
 
 
 class AceProgram(BaseModelFilePersistable):
-    generator_model: Model = Field(
-        description="Model used for generation in the ACE program"
-    )
+    generator_model: Model = Field(description="Model used for generation in the ACE program")
     premade_playbook: Playbook | None = Field(
         default=None, description="Optional premade playbook to use in the ACE program"
     )
@@ -160,11 +158,12 @@ class AceProgram(BaseModelFilePersistable):
 </PHASE>"""
         )
         response = executor.run(stream=False, input=full_phase_input)
-        log_debug(f"Analysis step response: {response.content}")
+        content = cast(BaseModel, response.content)
+        log_debug(f"Analysis step response: {content}")
 
         return AnalysisStepOutput(
             next_context=(
-                f"{user_and_playbook_content}\n\n<PREVIOUS_PHASE_RESPONSE>{response.content}</PREVIOUS_PHASE_RESPONSE>"
+                f"{user_and_playbook_content}\n\n<PREVIOUS_PHASE_RESPONSE>{content.model_dump()}</PREVIOUS_PHASE_RESPONSE>"
                 if response.content
                 else user_and_playbook_content
             ),
@@ -205,8 +204,7 @@ class AceProgram(BaseModelFilePersistable):
 
         if isinstance(stateless_executor, Team) and isinstance(executor, Team):
             stateless_executor.members = [
-                self._stateless_agno_executor(member, output_schema)
-                for member in executor.members
+                self._stateless_agno_executor(member, output_schema) for member in executor.members
             ]
 
         return stateless_executor
@@ -214,9 +212,7 @@ class AceProgram(BaseModelFilePersistable):
     def _analysis_step(self, executor: Agent | Team, playbook: Playbook) -> Step:
         def step_executor(input: StepInput) -> StepOutput:
             input_as_str = input.get_input_as_string()
-            stateless_executor = self._stateless_agno_executor(
-                executor, ProgramAnalysis
-            )
+            stateless_executor = self._stateless_agno_executor(executor, ProgramAnalysis)
 
             response = self._predict_run_analysis(
                 executor=stateless_executor,
@@ -237,9 +233,7 @@ class AceProgram(BaseModelFilePersistable):
             executor=step_executor,
         )
 
-    def _model_with_reasoning(
-        self, model: Model | str, effort: ReasoningEffort | None
-    ) -> Model:
+    def _model_with_reasoning(self, model: Model | str, effort: ReasoningEffort | None) -> Model:
         model_with_reasoning = self._resolve_model(model)
 
         if not effort:
@@ -251,9 +245,7 @@ class AceProgram(BaseModelFilePersistable):
             )
             return model_with_reasoning
 
-        log_debug(
-            f"Setting reasoning effort '{effort}' for model '{model_with_reasoning.name}'"
-        )
+        log_debug(f"Setting reasoning effort '{effort}' for model '{model_with_reasoning.name}'")
 
         setattr(model_with_reasoning, "reasoning", {"effort": effort})  # noqa: B010
 
@@ -355,9 +347,7 @@ class AceProgram(BaseModelFilePersistable):
 
     def pre_hook(
         self,
-    ) -> Callable[
-        [Agent | Team, RunInput, AgentSession | TeamSession, UserId, DebugMode], None
-    ]:
+    ) -> Callable[[Agent | Team, RunInput, AgentSession | TeamSession, UserId, DebugMode], None]:
         def hook(
             agent: Agent | Team,
             run_input: RunInput,
@@ -372,9 +362,7 @@ class AceProgram(BaseModelFilePersistable):
 
             self._set_session_playbook(session, playbook)
 
-            user_request_content = (
-                f"\n\n<USER_REQUEST>{run_input.input_content}</USER_REQUEST>"
-            )
+            user_request_content = f"\n\n<USER_REQUEST>{run_input.input_content}</USER_REQUEST>"
             input_content = (
                 "<PLAYBOOK> defines the execution guidelines and context. <PHASE> if present specifies which decomposed sub-problem or workflow step you are currently addressing."
                 "Using the <PLAYBOOK> and considering the <PHASE>, fulfill the <USER_REQUEST>:"
@@ -435,9 +423,7 @@ class AceProgram(BaseModelFilePersistable):
         playbook = session_data.get("playbook")
 
         if not playbook:
-            log_debug(
-                "No playbook found in session data. Using premade or default playbook."
-            )
+            log_debug("No playbook found in session data. Using premade or default playbook.")
 
             if not self.premade_playbook:
                 log_debug("No premade playbook provided. Using default empty playbook.")
