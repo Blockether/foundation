@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import logging
 import os
 from collections.abc import Callable
 from re import split
@@ -26,6 +27,7 @@ from agno.session import TeamSession
 from agno.team import Team
 from agno.utils.log import log_debug
 from agno.workflow import Step, StepInput, StepOutput, Workflow
+from agno.workflow.condition import Condition
 from openai.types import ReasoningEffort
 from pydantic import BaseModel, Field
 
@@ -33,6 +35,13 @@ from .models.base import BaseModelFilePersistable
 from .models.program.analysis import AnalysisStepOutput, ProgramAnalysis, ProgramMode
 from .models.program.generator import GeneratorOutput
 from .playbook import Playbook
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    filename="app.log",
+    filemode="w",
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
 
 type UserId = str | None
 type DebugMode = bool | None
@@ -53,7 +62,9 @@ ACEGenerator = Agent(
 
 
 class AceProgram(BaseModelFilePersistable):
-    generator_model: Model = Field(description="Model used for generation in the ACE program")
+    generator_model: Model = Field(
+        description="Model used for generation in the ACE program"
+    )
     premade_playbook: Playbook | None = Field(
         default=None, description="Optional premade playbook to use in the ACE program"
     )
@@ -135,22 +146,6 @@ class AceProgram(BaseModelFilePersistable):
 
 <PHASE>
     <PHASE_NAME>Analysis</PHASE_NAME>
-    <PHASE_CONTEXT>
-        - `mode_request`: What specific mode did user request? (None if unclear)
-        - `complexity`: How many steps/reasoning depth needed?
-        - `required_user_clarification`: What additional context you need from user to fulfill the <USER_REQUEST>?
-            ONLY request clarifications if the user's intent is genuinely ambiguous and affects the response.
-            DO NOT request clarifications for:
-                * Greetings, pleasantries, or phatic expressions (e.g., "hello", "hi", "siema", "how are you")
-                * Simple acknowledgments (e.g., "ok", "thanks", "got it")
-                * Clear, self-contained questions or statements
-                * Casual conversation that doesn't require task execution
-            If the user's message is clear OR is a social pleasantry, return None.
-        - `relevant_history`: What past interactions are relevant to this <USER_REQUEST>?
-        - `problem_decomposition`: If the <USER_REQUEST> is complex, break it down into smaller sub-problems or steps. Leave empty if straightforward.
-        - `target_objective`: What outcome did the user specify in the prompt? Should be provided only if unambiguous.
-        - `user_request_language_used`: Should be the language of the POLICY if the POLICY specifies a language, otherwise default to the user's language.
-    </PHASE_CONTEXT>
 
     <METADATA>
         {self._consensus_markdown()}
@@ -158,6 +153,7 @@ class AceProgram(BaseModelFilePersistable):
 </PHASE>"""
         )
         response = executor.run(stream=False, input=full_phase_input)
+        logging.debug(response.input)
         content = cast(BaseModel, response.content)
         log_debug(f"Analysis step response: {content}")
 
@@ -204,7 +200,8 @@ class AceProgram(BaseModelFilePersistable):
 
         if isinstance(stateless_executor, Team) and isinstance(executor, Team):
             stateless_executor.members = [
-                self._stateless_agno_executor(member, output_schema) for member in executor.members
+                self._stateless_agno_executor(member, output_schema)
+                for member in executor.members
             ]
 
         return stateless_executor
@@ -212,7 +209,9 @@ class AceProgram(BaseModelFilePersistable):
     def _analysis_step(self, executor: Agent | Team, playbook: Playbook) -> Step:
         def step_executor(input: StepInput) -> StepOutput:
             input_as_str = input.get_input_as_string()
-            stateless_executor = self._stateless_agno_executor(executor, ProgramAnalysis)
+            stateless_executor = self._stateless_agno_executor(
+                executor, ProgramAnalysis
+            )
 
             response = self._predict_run_analysis(
                 executor=stateless_executor,
@@ -233,7 +232,9 @@ class AceProgram(BaseModelFilePersistable):
             executor=step_executor,
         )
 
-    def _model_with_reasoning(self, model: Model | str, effort: ReasoningEffort | None) -> Model:
+    def _model_with_reasoning(
+        self, model: Model | str, effort: ReasoningEffort | None
+    ) -> Model:
         model_with_reasoning = self._resolve_model(model)
 
         if not effort:
@@ -245,7 +246,9 @@ class AceProgram(BaseModelFilePersistable):
             )
             return model_with_reasoning
 
-        log_debug(f"Setting reasoning effort '{effort}' for model '{model_with_reasoning.name}'")
+        log_debug(
+            f"Setting reasoning effort '{effort}' for model '{model_with_reasoning.name}'"
+        )
 
         setattr(model_with_reasoning, "reasoning", {"effort": effort})  # noqa: B010
 
@@ -260,9 +263,9 @@ class AceProgram(BaseModelFilePersistable):
                 provider, model_name = split("/", model)
                 if not model_name and not provider:
                     raise ValueError("Invalid model string provided.")
-                resolved_model = get_model(model_name, provider)
+                resolved_model = get_model(model_name, provider)  # type: ignore
             else:
-                resolved_model = get_model(model_name, provider)
+                resolved_model = get_model(model_name, provider)  # type: ignore
         else:
             resolved_model = model
         return resolved_model
@@ -306,6 +309,22 @@ class AceProgram(BaseModelFilePersistable):
             executor=step_executor,
         )
 
+    def _reflector_step(self, executor: Agent | Team, playbook: Playbook) -> Step:
+        def step_executor(input: StepInput) -> StepOutput:
+            return StepOutput(
+                content="",
+                images=input.images,
+                audio=input.audio,
+                videos=input.videos,
+                files=input.files,
+            )
+
+        return Step(
+            name="Reflection Step",
+            description="Reflect on the generated response and user input",
+            executor=step_executor,
+        )
+
     def _pre_hook_workflow(
         self, playbook: Playbook, executor: Agent | Team, debug_mode: bool
     ) -> Workflow:
@@ -313,6 +332,12 @@ class AceProgram(BaseModelFilePersistable):
             steps=[
                 self._analysis_step(executor, playbook=playbook),
                 self._generator_step(executor, playbook=playbook),
+                Condition(
+                    name="reflector_needed_condition",
+                    description="Check if reflector step is needed",
+                    evaluator=lambda _input: self.mode in ["learn", "hybrid"],
+                    steps=[self._reflector_step(executor, playbook=playbook)],
+                ),
             ],
             debug_mode=debug_mode,
         )
@@ -347,7 +372,9 @@ class AceProgram(BaseModelFilePersistable):
 
     def pre_hook(
         self,
-    ) -> Callable[[Agent | Team, RunInput, AgentSession | TeamSession, UserId, DebugMode], None]:
+    ) -> Callable[
+        [Agent | Team, RunInput, AgentSession | TeamSession, UserId, DebugMode], None
+    ]:
         def hook(
             agent: Agent | Team,
             run_input: RunInput,
@@ -362,10 +389,12 @@ class AceProgram(BaseModelFilePersistable):
 
             self._set_session_playbook(session, playbook)
 
-            user_request_content = f"\n\n<USER_REQUEST>{run_input.input_content}</USER_REQUEST>"
+            user_request_content = (
+                f"\n\n<USER_REQUEST>{run_input.input_content}</USER_REQUEST>"
+            )
             input_content = (
                 "<PLAYBOOK> defines the execution guidelines and context. <PHASE> if present specifies which decomposed sub-problem or workflow step you are currently addressing."
-                "Using the <PLAYBOOK> and considering the <PHASE>, fulfill the <USER_REQUEST>:"
+                " Using the <PLAYBOOK> and considering the <PHASE>, fulfill the <USER_REQUEST>:"
                 "\n\n------------------------------------------------------------------"
                 f"{user_request_content}{history_content}"
                 "\n\n------------------------------------------------------------------\n"
@@ -423,7 +452,9 @@ class AceProgram(BaseModelFilePersistable):
         playbook = session_data.get("playbook")
 
         if not playbook:
-            log_debug("No playbook found in session data. Using premade or default playbook.")
+            log_debug(
+                "No playbook found in session data. Using premade or default playbook."
+            )
 
             if not self.premade_playbook:
                 log_debug("No premade playbook provided. Using default empty playbook.")
