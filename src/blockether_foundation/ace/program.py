@@ -27,13 +27,13 @@ from agno.session import TeamSession
 from agno.team import Team
 from agno.utils.log import log_debug
 from agno.workflow import Step, StepInput, StepOutput, Workflow
-from agno.workflow.condition import Condition
 from openai.types import ReasoningEffort
 from pydantic import BaseModel, Field
 
 from .models.base import BaseModelFilePersistable
-from .models.program.analysis import AnalysisStepOutput, ProgramAnalysis, ProgramMode
+from .models.program.analysis import AnalysisOutput, ProgramMode
 from .models.program.generator import GeneratorOutput
+from .models.program.reflector import ReflectorOutput
 from .playbook import Playbook
 
 logging.basicConfig(
@@ -139,7 +139,7 @@ class AceProgram(BaseModelFilePersistable):
 
     def _predict_run_analysis(
         self, executor: Agent | Team, input_as_str: str | None, playbook: Playbook
-    ) -> AnalysisStepOutput:
+    ) -> AnalysisOutput:
         user_and_playbook_content = f"{input_as_str}{playbook.to_markdown()}"
         full_phase_input = dedent(
             f"""{user_and_playbook_content}
@@ -153,18 +153,10 @@ class AceProgram(BaseModelFilePersistable):
 </PHASE>"""
         )
         response = executor.run(stream=False, input=full_phase_input)
-        logging.debug(response.input)
-        content = cast(BaseModel, response.content)
+        content = cast(AnalysisOutput, response.content)
         log_debug(f"Analysis step response: {content}")
 
-        return AnalysisStepOutput(
-            next_context=(
-                f"{user_and_playbook_content}\n\n<PREVIOUS_PHASE_RESPONSE>{content.model_dump()}</PREVIOUS_PHASE_RESPONSE>"
-                if response.content
-                else user_and_playbook_content
-            ),
-            analysis=response.content,
-        )
+        return content
 
     def _stateless_agno_executor(
         self,
@@ -209,9 +201,7 @@ class AceProgram(BaseModelFilePersistable):
     def _analysis_step(self, executor: Agent | Team, playbook: Playbook) -> Step:
         def step_executor(input: StepInput) -> StepOutput:
             input_as_str = input.get_input_as_string()
-            stateless_executor = self._stateless_agno_executor(
-                executor, ProgramAnalysis
-            )
+            stateless_executor = self._stateless_agno_executor(executor, AnalysisOutput)
 
             response = self._predict_run_analysis(
                 executor=stateless_executor,
@@ -271,18 +261,18 @@ class AceProgram(BaseModelFilePersistable):
         return resolved_model
 
     def _reasoning_effort_from_analysis(
-        self, analysis_step: AnalysisStepOutput
+        self, analysis_step: AnalysisOutput
     ) -> ReasoningEffort | None:
         return (
-            analysis_step.analysis.complexity.reasoning_level
-            if analysis_step.analysis and analysis_step.analysis.complexity
+            analysis_step.complexity.reasoning_level
+            if analysis_step.complexity
             else None
         )
 
     def _generator_step(self, executor: Agent | Team, playbook: Playbook) -> Step:
         def step_executor(input: StepInput) -> StepOutput:
-            previous_step: AnalysisStepOutput = cast(
-                AnalysisStepOutput, input.previous_step_content
+            previous_step: AnalysisOutput = cast(
+                AnalysisOutput, input.previous_step_content
             )
             model_with_reasoning = self._model_with_reasoning(
                 self.generator_model,
@@ -293,7 +283,21 @@ class AceProgram(BaseModelFilePersistable):
                 output_schema=GeneratorOutput,
                 model=model_with_reasoning,
             )
-            response = stateless_executor.run(previous_step.next_context, stream=False)
+
+            full_phase_input = dedent(
+                f"""{input.get_input_as_string()}{playbook.to_markdown()}
+
+<PHASE>
+    <PHASE_NAME>Generation</PHASE_NAME>
+</PHASE>
+
+<PREVIOUS_PHASE_RESPONSE>
+    {previous_step.model_dump()}
+</PREVIOUS_PHASE_RESPONSE>
+                """
+            )
+
+            response = stateless_executor.run(full_phase_input, stream=False)
 
             return StepOutput(
                 content=response.content,
@@ -311,8 +315,31 @@ class AceProgram(BaseModelFilePersistable):
 
     def _reflector_step(self, executor: Agent | Team, playbook: Playbook) -> Step:
         def step_executor(input: StepInput) -> StepOutput:
+            previous_step: GeneratorOutput = cast(
+                GeneratorOutput, input.previous_step_content
+            )
+
+            full_phase_input = dedent(
+                f"""{input.get_input_as_string()}{playbook.to_markdown()}
+
+<PHASE>
+    <PHASE_NAME>Reflection</PHASE_NAME>
+</PHASE>
+
+<PREVIOUS_PHASE_RESPONSE>
+    {previous_step.model_dump()}
+</PREVIOUS_PHASE_RESPONSE>
+                """
+            )
+
+            stateless_executor = self._stateless_agno_executor(
+                executor, ReflectorOutput
+            )
+
+            response = stateless_executor.run(full_phase_input, stream=False)
+
             return StepOutput(
-                content="",
+                content=response.content,
                 images=input.images,
                 audio=input.audio,
                 videos=input.videos,
@@ -332,12 +359,7 @@ class AceProgram(BaseModelFilePersistable):
             steps=[
                 self._analysis_step(executor, playbook=playbook),
                 self._generator_step(executor, playbook=playbook),
-                Condition(
-                    name="reflector_needed_condition",
-                    description="Check if reflector step is needed",
-                    evaluator=lambda _input: self.mode in ["learn", "hybrid"],
-                    steps=[self._reflector_step(executor, playbook=playbook)],
-                ),
+                self._reflector_step(executor, playbook=playbook),
             ],
             debug_mode=debug_mode,
         )

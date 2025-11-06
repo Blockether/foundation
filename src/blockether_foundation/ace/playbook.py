@@ -23,7 +23,9 @@ __SEED_DETERMINISTIC_COMPONENT__ = 29
 
 
 class Playbook(BaseModelFilePersistable):
-    name: str = Field(default="Default Agent Playbook", description="Name of the playbook")
+    name: str = Field(
+        default="Default Agent Playbook", description="Name of the playbook"
+    )
 
     overview: PlaybookHighLevelOverview = PlaybookHighLevelOverview(
         description="This playbook provides a structured set of hypotheses, guidelines, and best practices to create agents that can dynamically adapt their capabilities based on <USER_REQUEST> at hand. It aims to enhance agent performance by leveraging domain knowledge and proven patterns.",
@@ -109,7 +111,9 @@ class Playbook(BaseModelFilePersistable):
         {"".join([entry.to_markdown() for entry in self._sort_by_metadata(entries)])}"""
 
     def _sections_to_markdown(self) -> str:
-        ground_truths_md = self._section_to_markdown("Ground Truths", self.ground_truths)
+        ground_truths_md = self._section_to_markdown(
+            "Ground Truths", self.ground_truths
+        )
 
         has_content = len(ground_truths_md.strip()) > 0
         if not has_content:
@@ -141,15 +145,19 @@ class Playbook(BaseModelFilePersistable):
             Markdown-formatted string with all playbook contents
             organized by section.
         """
-        return dedent(f"""
+        return dedent(
+            f"""
         <PLAYBOOK>
             # {self.name} ({self._playbook_version_to_markdown()})
             {self.overview.entry_to_markdown()}
             {self._policies_to_markdown()}
             {self._sections_to_markdown()}
-        </PLAYBOOK>""")
+        </PLAYBOOK>"""
+        )
 
-    def _sort_by_metadata(self, entries: Sequence[BaseSectionEntry]) -> list[BaseSectionEntry]:
+    def _sort_by_metadata(
+        self, entries: Sequence[BaseSectionEntry]
+    ) -> list[BaseSectionEntry]:
         """Sort entries by metadata statistics: helpful, harmful, neutral.
 
         Args:

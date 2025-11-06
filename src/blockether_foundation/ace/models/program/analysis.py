@@ -48,7 +48,9 @@ class RelevantHistoryItem(ChainOfThoughts):
         le=1.0,
     )
 
-    summary: str = Field(description="Brief summary of the past interaction (Markdown preferred).")
+    summary: str = Field(
+        description="Brief summary of the past interaction (Markdown preferred)."
+    )
 
     key_insights: list[str] = Field(
         description=(
@@ -74,14 +76,20 @@ class MathPythonEquations(ChainOfThoughts):
 
 
 class ConsensusModelRequirement(ChainOfThoughts):
-    name: str = Field(description="Name of the model to involve in consensus for this sub-problem.")
+    name: str = Field(
+        description="Name of the model to involve in consensus for this sub-problem."
+    )
     alias: str = Field(description="Short log/display name for this participant.")
     persona: str = Field(description="Behavior/style profile the model should adopt.")
-    perspective: str = Field(description="Lens or position used when assessing this sub-problem.")
+    perspective: str = Field(
+        description="Lens or position used when assessing this sub-problem."
+    )
 
 
 class SubProblemPlaybookEntry(ChainOfThoughts):
-    identifier: int = Field(description="ID of the playbook entry to use for this sub-problem.")
+    identifier: int = Field(
+        description="ID of the playbook entry to use for this sub-problem."
+    )
     success_criteria: str = Field(
         description="How to verify this playbook entry was applied correctly. What observable outcomes indicate success?"
     )
@@ -125,7 +133,7 @@ class DecomposedSubProblem(ChainOfThoughts):
     )
 
 
-class ProgramAnalysis(BaseModel):
+class AnalysisOutput(BaseModel):
     mode_request: ProgramModeRequest | None = Field(
         description=(
             "Analysis of the user's requested program mode. "
@@ -175,13 +183,4 @@ class ProgramAnalysis(BaseModel):
             "The natural language in which the user made their request e.g., 'English', 'Spanish', etc. "
             "Leave `None` if the language cannot be determined."
         ),
-    )
-
-
-class AnalysisStepOutput(BaseModel):
-    next_context: str = Field(
-        description="The updated context to be used in the next phase of the ACE program."
-    )
-    analysis: ProgramAnalysis | None = Field(
-        description="Analysis of the user's request and the program's response."
     )
