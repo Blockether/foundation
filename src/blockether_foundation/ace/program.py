@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from .models.base import BaseModelFilePersistable
 from .models.program.analysis import AnalysisOutput, ProgramMode
+from .models.program.curator import CuratorOutput
 from .models.program.generator import GeneratorOutput
 from .models.program.reflector import ReflectorOutput
 from .playbook import Playbook
@@ -271,29 +272,26 @@ class AceProgram(BaseModelFilePersistable):
 
     def _generator_step(self, executor: Agent | Team, playbook: Playbook) -> Step:
         def step_executor(input: StepInput) -> StepOutput:
-            previous_step: AnalysisOutput = cast(
-                AnalysisOutput, input.previous_step_content
-            )
-            model_with_reasoning = self._model_with_reasoning(
-                self.generator_model,
-                effort=self._reasoning_effort_from_analysis(previous_step),
-            )
             stateless_executor = self._stateless_agno_executor(
                 executor=executor,
                 output_schema=GeneratorOutput,
-                model=model_with_reasoning,
             )
 
             full_phase_input = dedent(
-                f"""{input.get_input_as_string()}{playbook.to_markdown()}
-
+                f"""
 <PHASE>
     <PHASE_NAME>Generation</PHASE_NAME>
-</PHASE>
 
-<PREVIOUS_PHASE_RESPONSE>
-    {previous_step.model_dump()}
-</PREVIOUS_PHASE_RESPONSE>
+    <PHASE_TASK>
+        You are an advanced problem-solving agent that applies accumulated strategic knowledge from the <PLAYBOOK> to generate accurate, well-reasoned answers for <USER_REQUEST>. Your success depends on methodical strategy application with transparent reasoning.
+
+        1. Review the playbook carefully and identify relevant strategies
+        2. Apply relevant insights from the playbook and show your step-by-step reasoning
+        3. Provide your final answer
+    </PHASE_TASK>
+</PHASE>
+{playbook.to_markdown()}
+{input.get_input_as_string()}
                 """
             )
 
@@ -320,15 +318,34 @@ class AceProgram(BaseModelFilePersistable):
             )
 
             full_phase_input = dedent(
-                f"""{input.get_input_as_string()}{playbook.to_markdown()}
-
+                f"""
 <PHASE>
     <PHASE_NAME>Reflection</PHASE_NAME>
-</PHASE>
 
-<PREVIOUS_PHASE_RESPONSE>
-    {previous_step.model_dump()}
-</PREVIOUS_PHASE_RESPONSE>
+    <PHASE_TASK>
+        You are a senior reviewer who diagnoses GENERATION_RESPONSE performance through systematic analysis, extracting concrete, actionable learnings from actual execution experiences to improve future performance.
+
+        1. Analyze what went right or wrong
+        2. Identify the root cause of any errors
+        3. Provide actionable insights for improvement
+        4. Tag each ground truth used as helpful/harmful/neutral
+    </PHASE_TASK>
+</PHASE>
+{input.get_input_as_string()}
+
+<GENERATION_RESPONSE>
+    <REASONING>
+        {previous_step.reasoning}
+    </REASONING>
+
+    <GROUND_TRUTHS_USED>
+        {previous_step.ground_truths_used if previous_step.ground_truths_used else ''}
+    </GROUND_TRUTHS_USED>
+
+    <ANSWER>
+        {previous_step.answer}
+    </ANSWER>
+</GENERATION_RESPONSE>
                 """
             )
 
@@ -352,14 +369,81 @@ class AceProgram(BaseModelFilePersistable):
             executor=step_executor,
         )
 
+    def _curator_step(self, executor: Agent | Team, playbook: Playbook) -> Step:
+        def step_executor(input: StepInput) -> StepOutput:
+            previous_step: ReflectorOutput = cast(
+                ReflectorOutput, input.previous_step_content
+            )
+
+            full_phase_input = dedent(
+                f"""
+<PHASE>
+    <PHASE_NAME>Curation</PHASE_NAME>
+
+    <PHASE_TASK>
+        You are the playbook architect who transforms execution experiences into high-quality, atomic strategic updates based on REFLECTION_PHASE. Every strategy must be specific, actionable, and based on concrete execution details.
+
+        1. Identify ONLY NEW insights missing from current playbook
+        2. Avoid redundancy - only add complementary content
+        3. Be concise and actionable
+        4. Organize by appropriate sections
+    </PHASE_TASK>
+</PHASE>
+{input.get_input_as_string()}
+
+<REFLECTION_PHASE>
+    <REASONING>
+        {previous_step.reasoning}
+    </REASONING>
+
+    <ERROR_IDENTIFICATION>
+        {previous_step.error_identification or ''}
+    </ERROR_IDENTIFICATION>
+
+    <ROOT_CAUSE_ANALYSIS>
+        {previous_step.root_cause_analysis or ''}
+    </ROOT_CAUSE_ANALYSIS>
+
+    <CORRECT_APPROACH>
+        {previous_step.correct_approach or ''}
+    </CORRECT_APPROACH>
+
+    <KEY_INSIGHTS>
+        {previous_step.key_insights or ''}
+    </KEY_INSIGHTS>
+</REFLECTION_PHASE>
+
+{playbook.to_markdown()}
+"""
+            )
+
+            stateless_executor = self._stateless_agno_executor(executor, CuratorOutput)
+
+            response = stateless_executor.run(full_phase_input, stream=False)
+
+            return StepOutput(
+                content=response.content,
+                images=input.images,
+                audio=input.audio,
+                videos=input.videos,
+                files=input.files,
+            )
+
+        return Step(
+            name="Reflection Step",
+            description="Reflect on the generated response and user input",
+            executor=step_executor,
+        )
+
     def _pre_hook_workflow(
         self, playbook: Playbook, executor: Agent | Team, debug_mode: bool
     ) -> Workflow:
         return Workflow(
             steps=[
-                self._analysis_step(executor, playbook=playbook),
+                # self._analysis_step(executor, playbook=playbook),
                 self._generator_step(executor, playbook=playbook),
                 self._reflector_step(executor, playbook=playbook),
+                self._curator_step(executor, playbook=playbook),
             ],
             debug_mode=debug_mode,
         )
@@ -412,15 +496,9 @@ class AceProgram(BaseModelFilePersistable):
             self._set_session_playbook(session, playbook)
 
             user_request_content = (
-                f"\n\n<USER_REQUEST>{run_input.input_content}</USER_REQUEST>"
+                f"\n<USER_REQUEST>{run_input.input_content}</USER_REQUEST>"
             )
-            input_content = (
-                "<PLAYBOOK> defines the execution guidelines and context. <PHASE> if present specifies which decomposed sub-problem or workflow step you are currently addressing."
-                " Using the <PLAYBOOK> and considering the <PHASE>, fulfill the <USER_REQUEST>:"
-                "\n\n------------------------------------------------------------------"
-                f"{user_request_content}{history_content}"
-                "\n\n------------------------------------------------------------------\n"
-            )
+            input_content = f"{user_request_content}{history_content}"
             workflow = self._pre_hook_workflow(
                 playbook=playbook, executor=agent, debug_mode=debug_mode or False
             )
@@ -459,7 +537,7 @@ class AceProgram(BaseModelFilePersistable):
         )
 
         history_str = (
-            f"\n\nTake into account the following conversation history:\n\n<CONVERSATION_HISTORY>{plain_history_str}</CONVERSATION_HISTORY>"
+            f"\n\n<CONVERSATION_HISTORY>{plain_history_str}</CONVERSATION_HISTORY>"
             if self.last_history_messages > 0
             else ""
         )

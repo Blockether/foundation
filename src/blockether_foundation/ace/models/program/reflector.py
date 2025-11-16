@@ -1,4 +1,13 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+
+class GroundTruthTag(BaseModel):
+    """Tag for a grand truth indicating its usefulness"""
+
+    id: str = Field(description="Grand truth ID")
+    tag: Literal["helpful", "harmful", "neutral"] = Field(description="Feedback tag")
 
 
 class ReflectorOutput(BaseModel):
@@ -30,4 +39,8 @@ class ReflectorOutput(BaseModel):
             "Key insights or lessons learned from the reflection process. "
             "Leave `None` if there are no specific insights."
         )
+    )
+
+    ground_truths: list[GroundTruthTag] = Field(
+        default_factory=list, description="Feedback on used ground truths."
     )
