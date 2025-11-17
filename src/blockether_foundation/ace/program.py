@@ -31,6 +31,7 @@ from openai.types import ReasoningEffort
 from pydantic import BaseModel, Field
 
 from .models.base import BaseModelFilePersistable
+from .models.playbook import EntryMetadataStatistic
 from .models.program.analysis import AnalysisOutput, ProgramMode
 from .models.program.curator import CuratorOutput
 from .models.program.generator import GeneratorOutput
@@ -54,12 +55,6 @@ model = OpenAIChat(
 )
 
 playbook = Playbook()
-
-ACEGenerator = Agent(
-    name="ACE Generator",
-    description="A generator part of the ACE self-improving agent framework, used to generate answers based on a playbook of strategies.",
-    instructions=playbook.to_markdown(),
-)
 
 
 class AceProgram(BaseModelFilePersistable):
@@ -86,6 +81,10 @@ class AceProgram(BaseModelFilePersistable):
         "   - 'hybrid': Combines learning and answering capabilities - fewer iterations than 'learn' mode."
         "   - 'learn': Focuses solely on learning from interactions - typically many iterations."
         "   - 'answer': Dedicated to providing answers based on existing knowledge - typically just one iteration.",
+    )
+    playbook_file_path: str | None = Field(
+        default="playbook.json",
+        description="Path to the JSON file for loading/saving the playbook. If None, file persistence is disabled.",
     )
 
     def __model_post_init__(self, context: Any) -> None:
@@ -355,6 +354,28 @@ class AceProgram(BaseModelFilePersistable):
 
             response = stateless_executor.run(full_phase_input, stream=False)
 
+            # Update ground truth metadata based on reflector feedback
+            reflector_output: ReflectorOutput = cast(ReflectorOutput, response.content)
+            if (
+                hasattr(reflector_output, "ground_truths")
+                and reflector_output.ground_truths
+            ):
+                updated_count = 0
+                for ground_truth_feedback in reflector_output.ground_truths:
+                    if hasattr(ground_truth_feedback, "id") and hasattr(
+                        ground_truth_feedback, "tag"
+                    ):
+                        # Cast the tag to EntryMetadataStatistic to ensure type safety
+                        tag = cast(EntryMetadataStatistic, ground_truth_feedback.tag)
+                        updated = playbook.update_ground_truth_metadata(
+                            ground_truth_feedback.id, tag
+                        )
+                        if updated:
+                            updated_count += 1
+                log_debug(
+                    f"Updated metadata for {updated_count} ground truth entries based on reflector feedback"
+                )
+
             return StepOutput(
                 content=response.content,
                 images=input.images,
@@ -383,10 +404,40 @@ class AceProgram(BaseModelFilePersistable):
     <PHASE_TASK>
         You are the playbook architect who transforms execution experiences into high-quality, atomic strategic updates based on REFLECTION_PHASE. Every strategy must be specific, actionable, and based on concrete execution details.
 
-        1. Identify ONLY NEW insights missing from current playbook
-        2. Avoid redundancy - only add complementary content
-        3. Be concise and actionable
-        4. Organize by appropriate sections
+        ## WHEN TO UPDATE PLAYBOOK
+
+        MANDATORY - Update when:
+        ✓ Reflection reveals new error pattern
+        ✓ Missing capability identified
+        ✓ Strategy needs refinement based on evidence
+        ✓ Contradiction between strategies detected
+        ✓ Success pattern worth preserving
+
+        FORBIDDEN - Skip updates when:
+        ✗ Reflection too vague or theoretical
+        ✗ Strategy already exists (>70% similar)
+        ✗ Learning lacks concrete evidence
+        ✗ Atomicity score below 40%
+
+        ## NEGATIVE LEARNING SYSTEM
+
+        ### HARMFUL STRATEGY MARKING (NEW SECTION)
+        When Reflector identifies consistently problematic choices:
+        - MARK strategies as harmful rather than removing them
+        - CREATE new avoidance strategies: "Avoid [specific option/tool/service] - causes [specific problem type]"
+        - TRACK patterns of failure for specific approaches across contexts
+
+        ### CHOICE-CONSEQUENCE ANALYSIS (NEW SECTION)
+        When processing Reflector feedback about option/tool/service selection:
+        - IDENTIFY: Which specific choice contributed to success/failure?
+        - PATTERN: Are there repeated outcomes with the same approach?
+        - ACTION: Create evidence-based recommendations or mark harmful patterns
+
+        ### STRATEGY SPECIFICITY RULES (NEW SECTION)
+        - GENERIC strategies: "Use [category] approaches" (when no clear evidence)
+        - SPECIFIC strategies: "Use [specific option] for [task type]" (only when evidence shows superiority)
+        - AVOIDANCE strategies: "Avoid [specific option] - causes [problem type]" (when evidence shows consistent issues)
+        - HARMFUL marking: Tag existing strategies that evidence shows are problematic
     </PHASE_TASK>
 </PHASE>
 {input.get_input_as_string()}
@@ -488,7 +539,6 @@ class AceProgram(BaseModelFilePersistable):
             user_id: UserId,
             debug_mode: DebugMode,
         ) -> None:
-            agent_input_schema = agent.input_schema
             history_content = self._get_conversation_history(session)
             session_data = session.session_data or {}
             playbook = self._get_playbook(session_data)
@@ -511,17 +561,54 @@ class AceProgram(BaseModelFilePersistable):
                 videos=list(run_input.videos) if run_input.videos else None,
             )
 
-            run_input.input_content = (
-                self._coerce_to_agent_input_schema(
-                    result_content=result.get_content_as_string(),
-                    agent_input_schema=agent_input_schema,
-                )
-                if agent_input_schema is not None
-                else result.get_content_as_string()
+            generator_output: GeneratorOutput = cast(
+                GeneratorOutput, result.step_results[0].content  # type: ignore
             )
-            # new_play# playbook.apply_deltas(result.get_playbook_deltas())
+            reflector_output: ReflectorOutput = cast(
+                ReflectorOutput, result.step_results[1].content  # type: ignore
+            )
+            curator_output: CuratorOutput = cast(
+                CuratorOutput, result.step_results[-1].content  # type: ignore
+            )
+
+            run_input.input_content = dedent(
+                f"""Based on the following analysis and reflections, generate the final answer.
+{input_content}
+
+<GENERATION_PHASE>
+    {generator_output.model_dump_json(indent=4)}
+</GENERATION_PHASE>
+<REFLECTION_PHASE>
+    {reflector_output.model_dump_json(indent=4)}
+</REFLECTION_PHASE>
+<CURATION_PHASE>
+    {curator_output.model_dump_json(indent=4)}
+</CURATION_PHASE>
+                """
+            )
+
+            # Apply curator deltas to playbook
+            if (
+                curator_output
+                and hasattr(curator_output, "operations")
+                and curator_output.operations is not None
+                and curator_output
+            ):
+                deltas = playbook.curator_operations_to_deltas(
+                    curator_output.operations
+                )
+                playbook = playbook.apply_deltas(deltas)
+                log_debug(
+                    f"Applied {len(deltas)} deltas to playbook from curator output"
+                )
 
             self._set_session_playbook(session, playbook)
+
+            playbook = self._get_playbook(session_data)
+            if self.playbook_file_path:
+                playbook.to_json_file(self.playbook_file_path)
+                log_debug(f"Saved playbook to file: {self.playbook_file_path}")
+
             return None
 
         return hook
@@ -553,20 +640,56 @@ class AceProgram(BaseModelFilePersistable):
 
         if not playbook:
             log_debug(
-                "No playbook found in session data. Using premade or default playbook."
+                "No playbook found in session data. Using premade, file, or default playbook."
             )
 
-            if not self.premade_playbook:
-                log_debug("No premade playbook provided. Using default empty playbook.")
-                playbook = Playbook()
-            else:
-                log_debug("Using premade playbook provided to the ACE program.")
-                playbook = self.premade_playbook
+            # Try to load from file first
+            try:
+                playbook_file = session_data.get(
+                    "playbook_file", self.playbook_file_path or "playbook.json"
+                )
+                if playbook_file:
+                    playbook = cast(Playbook, Playbook.from_json_file(playbook_file))
+                    log_debug(f"Loaded playbook from file: {playbook_file}")
+                else:
+                    raise FileNotFoundError("No playbook file path configured")
+            except (FileNotFoundError, ValueError, KeyError):
+                log_debug("No playbook file found or invalid file format.")
+
+                if not self.premade_playbook:
+                    log_debug(
+                        "No premade playbook provided. Using default empty playbook."
+                    )
+                    playbook = Playbook()
+                else:
+                    log_debug("Using premade playbook provided to the ACE program.")
+                    playbook = self.premade_playbook
 
         if isinstance(playbook, dict):
             playbook = Playbook.model_validate(playbook)
 
         return playbook
+
+    def set_playbook_file(self, file_path: str) -> None:
+        """
+        Set the playbook file path to be used for loading/saving the playbook.
+
+        Args:
+            file_path: Path to the JSON file containing the playbook
+        """
+        self.playbook_file_path = file_path
+
+    def load_playbook_from_file(self, file_path: str) -> Playbook:
+        """
+        Load a playbook from a JSON file.
+
+        Args:
+            file_path: Path to the JSON file containing the playbook
+
+        Returns:
+            Loaded Playbook object
+        """
+        return cast(Playbook, Playbook.from_json_file(file_path))
 
     def _set_session_playbook(
         self, session: AgentSession | TeamSession, playbook: Playbook
@@ -587,29 +710,6 @@ class AceProgram(BaseModelFilePersistable):
         #     **kwargs,
         # )
 
-
-# ACEGenerator = Agent(
-#     model=
-#     name="Taking into account the provided playbook perform the task as best as you can.",
-#     description="A generator part of the ACE self-improving agent framework, used to generate answers based on a playbook",
-#     instructions=playbook.to_markdown(),
-#     debug_mode=True,
-# )
-
-# ACEReflector = Agent(
-#     model=OpenAIChat(
-#         id="gpt-4o",
-#         base_url=os.getenv("BLOCKETHER_LLM_API_BASE_URL"),
-#         api_key=os.getenv("BLOCKETHER_LLM_API_KEY"),
-#     ),
-#     name="ACE Reflector",
-#     description="Analyzes generator outputs to identify issues and improvement opportunities based on the provided playbook.",
-#     instructions=dedent(f"""
-#         Taking into account the
-#         {playbook.to_markdown()}
-#     """),
-#     debug_mode=True,
-# )
 
 ace_program = AceProgram(
     generator_model=model,

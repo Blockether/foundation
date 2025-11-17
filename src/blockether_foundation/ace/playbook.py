@@ -8,11 +8,13 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from textwrap import dedent
 
+from agno.utils.log import log_debug
 from pydantic import Field
 
 from .models.base import BaseModelFilePersistable
 from .models.playbook import (
     BaseSectionEntry,
+    EntryMetadataStatistic,
     GroundTruth,
     PlaybookEntryDelta,
     PlaybookHighLevelOverview,
@@ -40,6 +42,10 @@ class Playbook(BaseModelFilePersistable):
     )
 
     version: int = Field(default=1, description="Version of the playbook content")
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timestamp when the playbook was last updated. Uses UTC timezone.",
+    )
 
     def _apply_delta(self, delta: PlaybookEntryDelta) -> Playbook:
         """
@@ -52,15 +58,155 @@ class Playbook(BaseModelFilePersistable):
             Updated Playbook with the applied delta
         """
         if delta.change_type == "add":
-            # Handle addition logic here
-            pass
+            # Handle addition logic
+            if delta.entry_type == "ground_truth":
+                # Create a new ground truth entry
+                # Parse metadata string to dictionary
+                metadata_str = delta.change_attributes.get(
+                    "metadata", "helpful: 0, harmful: 0, neutral: 0"
+                )
+                metadata_dict = {}
+                for item in metadata_str.split(","):
+                    key_value = item.strip().split(":")
+                    if len(key_value) == 2:
+                        metadata_dict[key_value[0].strip()] = int(key_value[1].strip())
+
+                # Generate a unique ID for the new entry
+                rand = random.SystemRandom(__SEED_DETERMINISTIC_COMPONENT__)
+                entry_id = base64.urlsafe_b64encode(rand.randbytes(6)).decode()
+
+                new_entry = GroundTruth(
+                    id=entry_id,
+                    section=delta.change_attributes.get("section", "General"),
+                    title=delta.change_attributes.get("title", "New Ground Truth"),
+                    content=delta.change_attributes.get("content", ""),
+                    proofs=[],  # Empty list of proofs for new entries
+                    metadata=metadata_dict,
+                )
+                self.ground_truths.append(new_entry)
         elif delta.change_type == "update":
-            # Handle update logic here
-            pass
+            # Handle update logic
+            if delta.entry_type == "ground_truth":
+                # Find the existing ground truth entry by ID
+                for entry in self.ground_truths:
+                    if entry.id == delta.entry_id:
+                        # Update the entry attributes
+                        for key, value in delta.change_attributes.items():
+                            if hasattr(entry, key):
+                                setattr(entry, key, value)
+                        entry.updated_at = datetime.now(UTC)
+                        break
         elif delta.change_type == "remove":
-            # Handle removal logic here
-            pass
+            # Handle removal logic
+            if delta.entry_type == "ground_truth":
+                # Remove the ground truth entry by ID
+                original_count = len(self.ground_truths)
+                self.ground_truths = [
+                    entry
+                    for entry in self.ground_truths
+                    if entry.id != delta.entry_id
+                ]
+                if len(self.ground_truths) < original_count:
+                    log_debug(f"Removed ground truth entry with ID: {delta.entry_id}")
         return self
+
+    def update_ground_truth_metadata(
+        self, ground_truth_id: str, tag: EntryMetadataStatistic
+    ) -> bool:
+        """
+        Update the metadata of a ground truth entry based on feedback tag.
+
+        Args:
+            ground_truth_id: ID of the ground truth entry to update
+            tag: Feedback tag ("helpful", "harmful", or "neutral") - properly typed as EntryMetadataStatistic
+
+        Returns:
+            True if the ground truth was found and updated, False otherwise
+        """
+        for entry in self.ground_truths:
+            if entry.id == ground_truth_id:
+                if tag in entry.metadata:
+                    entry.metadata[tag] += 1
+                else:
+                    entry.metadata[tag] = 1
+                entry.updated_at = datetime.now(UTC)
+                return True
+        return False
+
+    def curator_operations_to_deltas(self, operations) -> list[PlaybookEntryDelta]:
+        """
+        Convert curator operations to playbook deltas.
+
+        Args:
+            operations: List of CuratorOperation objects
+
+        Returns:
+            List of PlaybookEntryDelta objects
+        """
+        deltas = []
+        for operation in operations:
+            if operation.type == "ADD":
+                delta = PlaybookEntryDelta(
+                    entry_id="",  # Empty string for new entries (will be generated during application)
+                    change_type="add",
+                    change_attributes={
+                        "section": operation.section,
+                        "title": operation.content.split("\n")[0][
+                            :50
+                        ],  # First line as title
+                        "content": operation.content,
+                        "metadata": "helpful: 0, harmful: 0, neutral: 0",  # String format
+                    },
+                    entry_type="ground_truth",
+                    reasoning=f"Adding new ground truth entry from curator: {operation.section}",
+                    confidence=0.8,  # Default confidence for curator additions
+                )
+                deltas.append(delta)
+
+            elif operation.type == "UPDATE":
+                if not operation.ground_truth_id:
+                    log_debug(
+                        f"UPDATE operation missing ground_truth_id, skipping: {operation}"
+                    )
+                    continue
+
+                change_attributes = {
+                    "section": operation.section,
+                    "content": operation.content,
+                }
+
+                # Add new_title if provided
+                if operation.new_title:
+                    change_attributes["title"] = operation.new_title
+
+                delta = PlaybookEntryDelta(
+                    entry_id=operation.ground_truth_id,  # Use the provided ID as string
+                    change_type="update",
+                    change_attributes=change_attributes,
+                    entry_type="ground_truth",
+                    reasoning=f"Updating ground truth entry {operation.ground_truth_id} from curator: {operation.section}",
+                    confidence=0.9,  # Higher confidence for updates
+                )
+                deltas.append(delta)
+
+            elif operation.type == "REMOVE":
+                if not operation.ground_truth_id:
+                    log_debug(
+                        f"REMOVE operation missing ground_truth_id, skipping: {operation}"
+                    )
+                    continue
+
+                delta = PlaybookEntryDelta(
+                    entry_id=operation.ground_truth_id,  # Use the provided ID as string
+                    change_type="remove",
+                    change_attributes={},  # No attributes needed for removal
+                    entry_type="ground_truth",
+                    reasoning=f"Removing ground truth entry {operation.ground_truth_id} from curator: {operation.section}",
+                    confidence=0.9,  # Higher confidence for removals
+                )
+                deltas.append(delta)
+
+        return deltas
 
     def _entry_id(self, entry: SectionEntry) -> str:
         rand = random.SystemRandom(__SEED_DETERMINISTIC_COMPONENT__)
