@@ -1,11 +1,19 @@
 {
     "mcpServers": {
-        "web-search-prime": {
+        "search-engine": {
             "type": "http",
             "url": "https://api.z.ai/api/mcp/web_search_prime/mcp",
             "headers": {
                 "Authorization": "Bearer ${Z_AI_API_KEY}"
             }
+        },
+        "chrome-devtools": {
+            "type": "stdio",
+            "command": "npx",
+            "args": [
+                "chrome-devtools-mcp@latest"
+            ],
+            "env": {}
         },
         "serena": {
             "type": "stdio",
@@ -22,7 +30,7 @@
             ],
             "env": {}
         },
-        "cclsp": {
+        "code_analysis": {
             "type": "stdio",
             "command": "npx",
             "args": [
@@ -43,7 +51,7 @@
                 "mcp"
             ]
         },
-        "zai-mcp-server": {
+        "image-analysis": {
             "type": "stdio",
             "command": "npx",
             "args": [

@@ -2,7 +2,7 @@
 
 import pytest
 
-from blockether_foundation.errors import FoundationBaseError
+from blockether_foundation.errors import ConsensusFieldInitError, FoundationBaseError
 
 
 class CustomTestError(FoundationBaseError):
@@ -53,3 +53,13 @@ def test_error_with_none_details():
     """Test error with None details."""
     error = CustomTestError("Test error", details=None)
     assert str(error) == "test_errors.CustomTestError: Test error"
+
+
+@pytest.mark.unit
+def test_consensus_field_init_error_initializes_base_fields():
+    """Ensure ConsensusFieldInitError calls FoundationBaseError constructor."""
+
+    error = ConsensusFieldInitError("Invalid consensus field")
+
+    assert isinstance(error, FoundationBaseError)
+    assert "Invalid consensus field" in str(error)

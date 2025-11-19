@@ -5,39 +5,40 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from blockether_foundation.errors import FoundationBaseError
 
 
-class BotValidationErrorDetails(BaseModel):
+class TelegramErrorDetails(BaseModel):
+    """Base details model providing a UTC timestamp."""
+
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
+class BotValidationErrorDetails(TelegramErrorDetails):
     """Details for bot validation errors."""
 
     bot_name: str
     validation_errors: list[str]
     provided_config: dict[str, Any]
-    timestamp: datetime
-
-    model_config = {"arbitrary_types_allowed": True}
 
 
-class TelegramConfigurationDetails(BaseModel):
+class TelegramConfigurationDetails(TelegramErrorDetails):
     """Details for Telegram configuration errors."""
 
     configuration_type: str
     expected_type: str
     received_value: Any
-    timestamp: datetime
-
-    model_config = {"arbitrary_types_allowed": True}
 
 
-class BotNameConflictDetails(BaseModel):
+class BotNameConflictDetails(TelegramErrorDetails):
     """Details for bot name conflict errors."""
 
     conflicting_names: list[str]
     all_bot_names: list[str]
-    timestamp: datetime
 
 
 class TelegramInterfaceError(FoundationBaseError):
@@ -57,7 +58,6 @@ class BotValidationError(TelegramInterfaceError):
             bot_name=bot_name,
             validation_errors=validation_errors,
             provided_config=provided_config,
-            timestamp=datetime.now(UTC),
         )
         super().__init__(
             f"Bot configuration validation failed for '{bot_name}': {', '.join(validation_errors)}",
@@ -81,7 +81,6 @@ class TelegramConfigurationError(TelegramInterfaceError):
             configuration_type=configuration_type,
             expected_type=expected_type,
             received_value=received_value,
-            timestamp=datetime.now(UTC),
         )
         super().__init__(message, details)
 
@@ -93,7 +92,6 @@ class BotNameConflictError(TelegramInterfaceError):
         details = BotNameConflictDetails(
             conflicting_names=conflicting_names,
             all_bot_names=all_bot_names,
-            timestamp=datetime.now(UTC),
         )
         super().__init__(
             f"Bot names must be unique. Conflicting names: {', '.join(conflicting_names)}", details

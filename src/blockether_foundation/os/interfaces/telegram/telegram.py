@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
-from datetime import datetime
 from typing import Any
 
 from agno.agent import Agent
@@ -13,12 +13,11 @@ from agno.utils.log import logger
 from agno.workflow import Workflow
 from fastapi import APIRouter
 
-from .errors import (
-    BotNameConflictError,
-    BotValidationError,
-    TelegramConfigurationError,
+from blockether_foundation.runtime.aws_lambda.background_tasks import (
+    LambdaBackgroundTaskExtension,
 )
-from .handlers import attach_routes
+
+from .handlers import BackgroundTaskScheduler, attach_routes
 from .models import BotConfig
 from .validation import validate_and_normalize_bot_configs
 
@@ -48,6 +47,8 @@ class Telegram(BaseInterface):
             BotValidationError: If bot configuration is invalid
             BotNameConflictError: If bot names are not unique
         """
+        super().__init__(**kwargs)
+        self.background_task_scheduler = self._maybe_create_lambda_extension()
         logger.info(f"Initializing Telegram interface with {len(bot_configs)} bot(s)")
 
         # Validate bot configurations
@@ -59,28 +60,7 @@ class Telegram(BaseInterface):
 
         self.bot_configs = validation_result.unwrap()
         self.tags = list(tags) if tags else ["telegram"]
-
-        # Store the executor in the appropriate BaseInterface property
-        if isinstance(executor, Agent):
-            self.agent = executor
-            self.team = None
-            self.workflow = None
-            logger.info(f"Telegram interface configured with Agent executor")
-        elif isinstance(executor, Team):
-            self.agent = None
-            self.team = executor
-            self.workflow = None
-            logger.info(f"Telegram interface configured with Team executor")
-        elif isinstance(executor, Workflow):
-            self.agent = None
-            self.team = None
-            self.workflow = executor
-            logger.info(f"Telegram interface configured with Workflow executor")
-        else:
-            self.agent = None
-            self.team = None
-            self.workflow = None
-            logger.warning(f"Telegram interface configured with no executor")
+        self._configure_executor(executor)
 
         bot_names = [config.name for config in self.bot_configs]
         logger.info(f"Telegram interface initialized successfully for bots: {bot_names}")
@@ -101,39 +81,54 @@ class Telegram(BaseInterface):
 
             attach_routes(
                 router=bot_router,
-                executor=self.agent or self.team or self.workflow,
+                executor=self.executor,
                 bot_config=bot_config,
+                task_scheduler=self.background_task_scheduler,
             )
 
-            # Include bot router in main router
             main_router.include_router(bot_router)
-
-        # Add overview endpoint for all bots
-        @main_router.get("/status")
-        async def interface_status() -> dict[str, Any]:
-            """Get overview status of all configured bots."""
-            logger.debug("Interface status requested")
-            return {
-                "status": "active",
-                "interface_version": self.version,
-                "bot_count": len(self.bot_configs),
-                "bots": [
-                    {
-                        "name": config.name,
-                        "webhook_url": config.webhook_url,
-                        "has_webhook_secret": bool(config.webhook_secret),
-                        "max_concurrent_updates": config.max_concurrent_updates,
-                        "executor_timeout": config.executor_timeout,
-                        "has_access_restrictions": bool(config.allowlist_user_ids)
-                        or bool(config.denylist_user_ids),
-                    }
-                    for config in self.bot_configs
-                ],
-                "executor_type": type(self.agent or self.team or self.workflow).__name__
-                if (self.agent or self.team or self.workflow)
-                else None,
-                "timestamp": datetime.utcnow().isoformat(),
-            }
 
         logger.info(f"FastAPI router created with {len(self.bot_configs)} bot endpoints")
         return main_router
+
+    @property
+    def executor(self) -> Agent | Team | Workflow | None:
+        """Return the configured executor instance, if any."""
+        return self.agent or self.team or self.workflow
+
+    def _configure_executor(self, executor: Agent | Team | Workflow | None) -> None:
+        """Store executor on the correct interface attribute and log the outcome."""
+        self.agent = None
+        self.team = None
+        self.workflow = None
+
+        if isinstance(executor, Agent):
+            self.agent = executor
+            logger.info("Telegram interface configured with Agent executor")
+        elif isinstance(executor, Team):
+            self.team = executor
+            logger.info("Telegram interface configured with Team executor")
+        elif isinstance(executor, Workflow):
+            self.workflow = executor
+            logger.info("Telegram interface configured with Workflow executor")
+        else:
+            logger.warning("Telegram interface configured with no executor")
+
+    def _maybe_create_lambda_extension(self) -> BackgroundTaskScheduler | None:
+        """Instantiate Lambda extension when running inside AWS Lambda."""
+
+        runtime_api = os.getenv("AWS_LAMBDA_RUNTIME_API")
+        if not runtime_api:
+            logger.debug(
+                "AWS_LAMBDA_RUNTIME_API not set; skipping Lambda background task scheduler"
+            )
+            return None
+
+        try:
+            extension = LambdaBackgroundTaskExtension()
+        except Exception as exc:
+            logger.warning(f"Failed to start Lambda background task extension: {exc}")
+            return None
+
+        logger.info("Lambda background task extension enabled for Telegram interface")
+        return extension

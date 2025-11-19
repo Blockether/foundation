@@ -1,0 +1,121 @@
+"""Unit tests for Telegram validation helpers."""
+
+from blockether_foundation.os.interfaces.telegram.errors import (
+    BotNameConflictError,
+    BotValidationError,
+    BotValidationErrorDetails,
+    TelegramConfigurationError,
+)
+from blockether_foundation.os.interfaces.telegram.models import BotConfig
+from blockether_foundation.os.interfaces.telegram.validation import (
+    validate_and_normalize_bot_configs,
+    validate_bot_config_list,
+    validate_bot_name,
+    validate_single_bot_config,
+)
+
+
+def _make_bot_config(name: str) -> BotConfig:
+    return BotConfig(name=name, token="A" * 16)
+
+
+def test_validate_and_normalize_accepts_valid_list() -> None:
+    config = _make_bot_config("valid-bot")
+
+    result = validate_and_normalize_bot_configs([config])
+
+    assert result.is_ok()
+    validated = result.unwrap()
+    assert validated == [config]
+
+
+def test_validate_and_normalize_rejects_duplicate_names() -> None:
+    config_one = _make_bot_config("duplicate-bot")
+    config_two = _make_bot_config("duplicate-bot")
+
+    result = validate_and_normalize_bot_configs([config_one, config_two])
+
+    assert result.is_err()
+    error = result.unwrap_err()
+    assert isinstance(error, BotNameConflictError)
+    assert error.conflicting_names == ["duplicate-bot"]
+
+
+def test_validate_bot_name_rejects_invalid_characters() -> None:
+    result = validate_bot_name("invalid@name")
+    assert result.is_err()
+
+
+def test_validate_bot_name_rejects_empty_string() -> None:
+    result = validate_bot_name("   ")
+    assert result.is_err()
+
+
+def test_validate_bot_name_rejects_overly_long_name() -> None:
+    result = validate_bot_name("a" * 65)
+    assert result.is_err()
+
+
+def test_validate_single_bot_config_errors_on_bad_values() -> None:
+    config = BotConfig(
+        name="bad name!",
+        token="short",
+        max_concurrent_updates=0,
+        executor_timeout=4001,
+    )
+    result = validate_single_bot_config(config)
+    assert result.is_err()
+    error = result.unwrap_err()
+    assert isinstance(error, BotValidationError)
+    assert isinstance(error.details, BotValidationErrorDetails)
+    assert any("cannot" in msg for msg in error.details.validation_errors)
+
+
+def test_validate_single_bot_config_requires_token() -> None:
+    config = BotConfig(name="valid-name", token="   ")
+    result = validate_single_bot_config(config)
+
+    assert result.is_err()
+    error = result.unwrap_err()
+    assert isinstance(error.details, BotValidationErrorDetails)
+    assert "Bot token cannot be empty" in error.details.validation_errors
+
+
+def test_validate_single_bot_config_numeric_upper_bounds() -> None:
+    config = BotConfig(
+        name="valid-name",
+        token="A" * 32,
+        max_concurrent_updates=2000,
+        executor_timeout=0,
+    )
+
+    result = validate_single_bot_config(config)
+
+    assert result.is_err()
+    error = result.unwrap_err()
+    assert isinstance(error.details, BotValidationErrorDetails)
+    assert any("cannot exceed 1000" in msg for msg in error.details.validation_errors)
+    assert any(
+        "executor_timeout must be positive" in msg for msg in error.details.validation_errors
+    )
+
+
+def test_validate_bot_config_list_rejects_empty_list() -> None:
+    result = validate_bot_config_list([])
+    assert result.is_err()
+
+
+def test_validate_bot_config_list_returns_first_error() -> None:
+    valid = _make_bot_config("valid")
+    invalid = BotConfig(name="", token="A" * 32)
+
+    result = validate_bot_config_list([valid, invalid])
+
+    assert result.is_err()
+    assert isinstance(result.unwrap_err(), BotValidationError)
+
+
+def test_validate_and_normalize_bot_configs_requires_non_empty_list() -> None:
+    result = validate_and_normalize_bot_configs([])
+    assert result.is_err()
+    assert isinstance(result.unwrap_err(), TelegramConfigurationError)

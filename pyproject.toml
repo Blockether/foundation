@@ -14,13 +14,12 @@ classifiers = [
 dependencies = [
     "fastapi>=0.120.0",
     "llm-sandbox>=0.3.24",
-    "model2vec>=0.7.0",
     "openai>=2.6.1",
     "pydantic>=2.12.3",
     "scikit-learn>=1.5.0",
     "sqlalchemy>=2.0.44",
-    "python-telegram-bot>=21.3",
     "agno>=2.2.8",
+    "tenacity>=8.2.0"
 ]
 
 [project.optional-dependencies]
@@ -63,6 +62,7 @@ markers = [
     "unit: marks fast unit tests with mocked dependencies (default)",
     "integration: marks tests that make real LLM API calls (slow, skipped by default)",
     "slow: marks slow running tests",
+    "asyncio: marks coroutine tests that need an event loop",
 ]
 
 [tool.coverage.run]

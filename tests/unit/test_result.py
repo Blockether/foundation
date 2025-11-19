@@ -119,7 +119,10 @@ class TestResult:
     def test_unwrap_or_else_on_ok(self):
         """Test unwrap_or_else returns value on Ok result."""
         result = Result.Ok(42)
-        callback = lambda error: 0
+
+        def callback(_error: ResultError) -> int:
+            return 0
+
         assert result.unwrap_or_else(callback) == 42
 
     @pytest.mark.unit
@@ -127,10 +130,24 @@ class TestResult:
         """Test unwrap_or_else calls callback on Err result."""
         error = ResultError("test error")
         result = Result.Err(error)
-        callback = lambda e: f"handled: {e}"
+
+        def callback(err: ResultError) -> str:
+            return f"handled: {err}"
+
         result_str = result.unwrap_or_else(callback)
         assert "handled:" in result_str
         assert "test error" in result_str
+
+    @pytest.mark.unit
+    def test_unwrap_or_else_returns_callback_value(self):
+        """Ensure unwrap_or_else returns the value from the callback when Err."""
+        error = ResultError("boom")
+        result = Result.Err(error)
+
+        def callback(err: ResultError) -> str:
+            return f"fallback:{err}"
+
+        assert result.unwrap_or_else(callback) == f"fallback:{error}"
 
     @pytest.mark.unit
     def test_expect_success(self):
@@ -146,6 +163,14 @@ class TestResult:
 
         with pytest.raises(ResultError):
             result.expect("Custom message")
+
+    @pytest.mark.unit
+    def test_expect_includes_original_error(self):
+        """Ensure expect includes original error details in raised message."""
+        error = ResultError("bad state")
+        result = Result.Err(error)
+        with pytest.raises(ResultError, match="bad state"):
+            result.expect("Should not happen")
 
     @pytest.mark.unit
     def test_map_on_ok(self):
@@ -229,7 +254,10 @@ class TestResult:
     def test_or_else_on_ok(self):
         """Test or_else returns original Ok result."""
         result = Result.Ok(42)
-        fallback = lambda e: Result.Ok(0)
+
+        def fallback(_error: ResultError) -> Result[int, ResultError]:
+            return Result.Ok(0)
+
         final = result.or_else(fallback)
         assert final.is_ok()
         assert final.unwrap() == 42
@@ -239,7 +267,10 @@ class TestResult:
         """Test or_else returns fallback Result on Err."""
         error = ResultError("error")
         result = Result.Err(error)
-        fallback = lambda e: Result.Ok(0)
+
+        def fallback(_error: ResultError) -> Result[int, ResultError]:
+            return Result.Ok(0)
+
         final = result.or_else(fallback)
         assert final.is_ok()
         assert final.unwrap() == 0
@@ -249,7 +280,10 @@ class TestResult:
         """Test or_else propagates Err from fallback function."""
         error = ResultError("error")
         result = Result.Err(error)
-        fallback = lambda e: Result.Err(ResultError("fallback error"))
+
+        def fallback(_error: ResultError) -> Result[int, ResultError]:
+            return Result.Err(ResultError("fallback error"))
+
         final = result.or_else(fallback)
         assert final.is_err()
         final_err_str = str(final.unwrap_err())

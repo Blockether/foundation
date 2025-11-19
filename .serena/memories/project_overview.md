@@ -60,10 +60,9 @@
 - **Multi-bot Support**: Multiple Telegram bots in single AgentOS instance
 - **Agent/Team/Workflow Support**: Works with all Agno entity types
 
-#### 5. Encoder System (`encoder/`)
-- **Potion Encoder** (`potion.py`) - Text embedding using Potion-8M model
-- Singleton pattern for model management
-- Cosine similarity calculations
+#### 5. Text Embedding System
+- Integration with external text embedding providers
+- Vector similarity calculations
 - Integration with Agno vector embedding
 
 #### 6. Utilities (`utils.py`, `concurrency.py`)
@@ -79,9 +78,6 @@ src/blockether_foundation/
 ├── errors.py                   # Error hierarchy
 ├── utils.py                    # Utility functions
 ├── concurrency.py              # Concurrency utilities
-├── encoder/                    # Text encoding system
-│   ├── __init__.py
-│   └── potion.py               # Potion encoder implementation
 ├── ace/                        # ACE Framework
 │   ├── __init__.py
 │   ├── program.py              # Main ACE orchestrator
@@ -103,8 +99,6 @@ src/blockether_foundation/
 │           ├── router.py         # FastAPI routes
 │           └── README.md
 └── assets/                     # Static assets
-    └── model2vec/              # Pre-trained models
-        └── potion-8M-base/
 ```
 
 ## Design Patterns
@@ -130,21 +124,7 @@ class Telegram(BaseInterface):
             raise ValueError("Requires an agent, team, or workflow")
 ```
 
-### 3. Singleton Pattern (Encoders)
-```python
-class PotionEncoder:
-    _model: StaticModel | None = None
-    _initialized: bool = False
-    
-    @classmethod
-    def get_instance(cls) -> "PotionEncoder":
-        if not cls._initialized:
-            cls._model = StaticModel.from_pretrained(...)
-            cls._initialized = True
-        return cls()
-```
-
-### 4. Factory Pattern (Entities)
+### 3. Factory Pattern (Entities)
 ```python
 def create_entity(type: str, config: dict) -> Result[Agent, CreationError]:
     if type == "agent":
@@ -154,6 +134,7 @@ def create_entity(type: str, config: dict) -> Result[Agent, CreationError]:
     else:
         return Result.Err(CreationError(f"Unknown type: {type}"))
 ```
+
 
 ## Development Workflow
 

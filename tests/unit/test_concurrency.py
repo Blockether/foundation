@@ -283,3 +283,23 @@ class TestConcurrentProcessor:
         # BaseException subclasses should not be retried
         with pytest.raises(KeyboardInterrupt, match="Interrupted"):
             asyncio.run(processor.process(["test"], mock_processor))
+
+    @pytest.mark.unit
+    def test_exception_group_handling_on_python_311_plus(self):
+        """Test handling of BaseExceptionGroup on Python 3.11+."""
+        import sys
+
+        # Only test on Python 3.11+
+        if sys.version_info >= (3, 11):
+            from builtins import BaseExceptionGroup
+
+            processor = ConcurrentProcessor[str, str](max_retries=2, retry_min_wait=10)
+
+            async def mock_processor(item: str) -> Sequence[str]:
+                raise BaseExceptionGroup("group", [ValueError("error1"), RuntimeError("error2")])
+
+            # BaseExceptionGroup should not be retried and should propagate
+            with pytest.raises(BaseExceptionGroup):
+                asyncio.run(processor.process(["test"], mock_processor))
+
+    

@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from agno.utils.log import logger
+
 from blockether_foundation.result import Result
 
 from .errors import (
-    BotValidationError,
     BotNameConflictError,
+    BotValidationError,
     TelegramConfigurationError,
 )
 from .models import BotConfig
+
+ValidationError = TelegramConfigurationError | BotValidationError | BotNameConflictError
+BotConfigListResult = Result[list[BotConfig], ValidationError]
+
+
+def _empty_bot_config_error(received_value: object) -> TelegramConfigurationError:
+    return TelegramConfigurationError(
+        message="Bot configuration list cannot be empty",
+        configuration_type="bot_configs",
+        expected_type="non-empty list[BotConfig]",
+        received_value=received_value,
+    )
 
 
 def validate_bot_name(name: str) -> Result[None, BotValidationError]:
@@ -50,11 +61,9 @@ def validate_single_bot_config(bot_config: BotConfig) -> Result[None, BotValidat
     # Validate name
     name_result = validate_bot_name(bot_config.name)
     if name_result.is_err():
-        errors.extend(
-            name_result.unwrap_err().details.validation_errors
-            if name_result.unwrap_err().details
-            else ["Invalid bot name"]
-        )
+        name_error = name_result.unwrap_err()
+        details = getattr(name_error, "details", None)
+        errors.extend(details.validation_errors if details else ["Invalid bot name"])
 
     # Validate token
     if not bot_config.token or not bot_config.token.strip():
@@ -90,30 +99,17 @@ def validate_single_bot_config(bot_config: BotConfig) -> Result[None, BotValidat
     return Result.Ok(None)
 
 
-def validate_bot_config_list(
-    bot_configs: list[BotConfig],
-) -> Result[
-    list[BotConfig], TelegramConfigurationError | BotValidationError | BotNameConflictError
-]:
+def validate_bot_config_list(bot_configs: list[BotConfig]) -> BotConfigListResult:
     """Validate a list of bot configurations."""
     if not bot_configs:
         logger.error("Bot configuration list validation failed: empty list")
-        return Result.Err(
-            TelegramConfigurationError(
-                message="Bot configuration list cannot be empty",
-                configuration_type="bot_configs",
-                expected_type="non-empty list[BotConfig]",
-                received_value=bot_configs,
-            )
-        )
+        return Result.Err(_empty_bot_config_error(bot_configs))
 
     # Validate each bot configuration
     for bot_config in bot_configs:
         validation_result = validate_single_bot_config(bot_config)
         if validation_result.is_err():
-            # Convert the error to be compatible with the return type
-            error = validation_result.unwrap_err()
-            return Result.Err(error)
+            return Result.Err(validation_result.unwrap_err())
 
     logger.debug(f"Bot configuration list validation passed for {len(bot_configs)} configurations")
     return Result.Ok(bot_configs)
@@ -140,52 +136,9 @@ def check_bot_name_uniqueness(bot_configs: list[BotConfig]) -> Result[None, BotN
     return Result.Ok(None)
 
 
-def normalize_bot_configs(
-    bot: BotConfig | list[BotConfig],
-) -> Result[
-    list[BotConfig], TelegramConfigurationError | BotValidationError | BotNameConflictError
-]:
-    """Normalize bot configurations to a list."""
-    if isinstance(bot, BotConfig):
-        logger.debug("Normalized single BotConfig to list")
-        return Result.Ok([bot])
-    elif isinstance(bot, list):
-        logger.debug(f"Bot configuration is already a list with {len(bot)} items")
-        if not bot:
-            return Result.Err(
-                TelegramConfigurationError(
-                    message="Bot configuration list cannot be empty",
-                    configuration_type="bot_configs",
-                    expected_type="non-empty list[BotConfig]",
-                    received_value=bot,
-                )
-            )
-        return Result.Ok(bot)
-    else:
-        return Result.Err(
-            TelegramConfigurationError(
-                message=f"Invalid bot configuration type: {type(bot)}",
-                configuration_type="bot_configs",
-                expected_type="BotConfig | list[BotConfig]",
-                received_value=bot,
-            )
-        )
-
-
-def validate_and_normalize_bot_configs(
-    bot: BotConfig | list[BotConfig],
-) -> Result[
-    list[BotConfig], TelegramConfigurationError | BotValidationError | BotNameConflictError
-]:
-    """Comprehensive validation and normalization of bot configurations."""
-    logger.info("Starting comprehensive bot configuration validation")
-
-    # Normalize to list
-    normalize_result = normalize_bot_configs(bot)
-    if normalize_result.is_err():
-        return normalize_result
-
-    bot_configs = normalize_result.unwrap()
+def validate_and_normalize_bot_configs(bot_configs: list[BotConfig]) -> BotConfigListResult:
+    """Validate Telegram bot configurations while preserving existing interface."""
+    logger.info("Starting bot configuration validation")
 
     # Validate list
     list_validation_result = validate_bot_config_list(bot_configs)

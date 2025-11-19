@@ -15,7 +15,6 @@ class BotConfig(BaseModel):
     executor_timeout: int = 30
     allowlist_user_ids: list[str] = []
     denylist_user_ids: list[str] = []
-    enable_debug_mode: bool = False
 
     @property
     def webhook_url(self) -> str:

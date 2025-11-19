@@ -18,7 +18,6 @@ tests/
 ├── unit/                     # Unit tests (fast, mocked)
 │   ├── test_result.py         # Result type tests
 │   ├── test_errors.py         # Error handling tests
-│   ├── test_encoder_potion.py # Encoder tests
 │   ├── test_telegram_interface.py # Telegram interface tests
 │   └── ...
 └── integration/              # Integration tests (slow, real APIs)
@@ -102,19 +101,15 @@ class TestError(FoundationBaseError):
 ```python
 from unittest.mock import Mock, patch
 
-@patch('blockether_foundation.encoder.potion.StaticModel')
-def test_encoder_with_mock_model(mock_static_model):
-    """Test encoder with mocked model."""
-    mock_model_instance = Mock()
-    mock_static_model.from_pretrained.return_value = mock_model_instance
-    
-    from blockether_foundation.encoder.potion import PotionEncoder
-    
-    encoder = PotionEncoder.get_instance()
-    result = encoder.encode(["test"])
-    
-    mock_static_model.from_pretrained.assert_called_once()
-    assert result is not None
+@patch('external_module.expensive_function')
+def test_with_mocked_dependency(self, mock_function):
+    """Test function with mocked external dependency."""
+    mock_function.return_value = "mocked_value"
+
+    result = function_that_uses_dependency()
+
+    mock_function.assert_called_once()
+    assert result == "processed_mocked_value"
 ```
 
 #### Mocking Database Operations
