@@ -29,7 +29,7 @@ class PatternSituation(BaseModel):
 
 
 class PlaybookEntryDelta(ChainOfThoughts):
-    entry_id: str = Field(description="ID of the playbook entry to apply the delta to")
+    entry_id: int = Field(description="ID of the playbook entry to apply the delta to")
     change_type: Literal["add", "update", "remove"] = Field(
         description="Type of change to apply to the entry"
     )

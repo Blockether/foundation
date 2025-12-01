@@ -1,6 +1,5 @@
 import json
 import pickle
-from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -25,13 +24,8 @@ class BaseModelFilePersistable(BaseModel):
         return cls(**data)
 
     def to_json_file(self, file_path: str) -> None:
-        def datetime_converter(o):
-            if isinstance(o, datetime):
-                return o.isoformat()
-            raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
-
         with open(file_path, "w") as f:
-            json.dump(self.model_dump(), f, indent=4, default=datetime_converter)
+            json.dump(self.model_dump(), f, indent=4)
 
     @classmethod
     def from_pickle_file(cls, file_path: str) -> "BaseModelFilePersistable":

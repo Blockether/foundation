@@ -8,4 +8,3 @@ htmlcov
 .mypy_cache
 .venv
 *.log
-playbook.json
