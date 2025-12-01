@@ -9,4 +9,3 @@ htmlcov
 .venv
 *.log
 playbook.json
-benchmark_results

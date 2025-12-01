@@ -725,8 +725,7 @@ agent = Agent(
     db=InMemoryDb(),
 )
 
-if __name__ == "__main__":
-    agent.cli_app(
-        session_id="ace_program_session",
-        stream=True,
-    )
+agent.cli_app(
+    session_id="ace_program_session",
+    stream=True,
+)
