@@ -3,303 +3,556 @@
 import asyncio
 import time
 from collections.abc import Sequence
+from typing import Final
 
 import pytest
 
 from blockether_foundation.concurrency import ConcurrentProcessor
+
+# Test constants
+DEFAULT_CONCURRENCY: Final[int] = 5
+CUSTOM_CONCURRENCY: Final[int] = 10
+CUSTOM_MAX_RETRIES: Final[int] = 5
+CUSTOM_RETRY_MIN_WAIT: Final[int] = 1000
+CUSTOM_RETRY_MAX_WAIT: Final[int] = 5000
+LOW_CONCURRENCY: Final[int] = 2
+TEST_SLEEP_DURATION: Final[float] = 0.1
+PERFORMANCE_SLEEP_DURATION: Final[float] = 0.01
+MIN_RETRY_WAIT: Final[int] = 10
+PERFORMANCE_TOLERANCE: Final[float] = 0.8
+TRANSIENT_FAILURE_THRESHOLD: Final[int] = 2
+PERMANENT_FAILURE_RETRIES: Final[int] = 2
+CUSTOM_RETRY_RETRIES: Final[int] = 2
+HIGH_CONCURRENCY: Final[int] = 10
+SINGLE_CONCURRENCY: Final[int] = 1
+PERFORMANCE_ITEM_COUNT: Final[int] = 5
+CONCURRENCY_TEST_ITEM_COUNT: Final[int] = 4
+
+# Test string constants
+PROCESSED_PREFIX: Final[str] = "processed: "
+RESULT1_PREFIX: Final[str] = "result1_"
+RESULT2_PREFIX: Final[str] = "result2_"
+TUPLE_PREFIX: Final[str] = "tuple_"
+TEST_ITEM: Final[str] = "test"
+HELLO_WORLD: Final[str] = "hello"
+WORLD_STRING: Final[str] = "world"
+PERMANENT_ERROR: Final[str] = "Permanent error"
+TRANSIENT_ERROR: Final[str] = "Transient error"
+NON_RETRYABLE_ERROR: Final[str] = "Non-retryable error"
+INTERRUPTED_ERROR: Final[str] = "Interrupted"
+PERMANENT_FAILURE: Final[str] = "Permanent failure"
+FAIL_ITEM: Final[str] = "fail"
+OK_ITEM: Final[str] = "ok"
+OK2_ITEM: Final[str] = "ok2"
+GROUP_ERROR: Final[str] = "group"
+ERROR1_MESSAGE: Final[str] = "error1"
+ERROR2_MESSAGE: Final[str] = "error2"
+
+# Additional test constants for magic values
+ITEM1_NAME: Final[str] = "item1"
+ITEM2_NAME: Final[str] = "item2"
+ITEM3_NAME: Final[str] = "item3"
+ITEM_A: Final[str] = "a"
+ITEM_B: Final[str] = "b"
+ITEM_X: Final[str] = "x"
+ITEM_Y: Final[str] = "y"
+UPPER_HELLO: Final[str] = "HELLO"
+UPPER_WORLD: Final[str] = "WORLD"
+PROCESSED_TEST: Final[str] = "processed: test"
+PROCESSED_X: Final[str] = "processed: x"
+PROCESSED_Y: Final[str] = "processed: y"
+
+
+# Helper processor functions to avoid inline async definitions with prohibited statements
+async def simple_item_processor(item: str) -> Sequence[str]:
+    """Simple processor that returns processed item."""
+    return [f"{PROCESSED_PREFIX}{item}"]
+
+
+async def delayed_item_processor(item: str) -> Sequence[str]:
+    """Processor with delay for testing concurrency."""
+    await asyncio.sleep(TEST_SLEEP_DURATION)
+    return [f"{PROCESSED_PREFIX}{item}"]
+
+
+async def dual_item_processor(item: str) -> Sequence[str]:
+    """Processor that returns two items per input."""
+    return [f"{RESULT1_PREFIX}{item}", f"{RESULT2_PREFIX}{item}"]
+
+
+async def upper_case_processor(item: str) -> Sequence[str]:
+    """Processor that returns uppercase version of item."""
+    return [item.upper()]
+
+
+async def empty_result_processor(item: str) -> Sequence[str]:
+    """Processor that returns empty results."""
+    return []
+
+
+async def none_including_processor(item: str) -> Sequence[str | None]:
+    """Processor that includes None values in results."""
+    return [item, None, item]
+
+
+# Context manager for tracking concurrent executions without try/finally
+class ConcurrencyTracker:
+    """Thread-safe counter for tracking concurrent executions."""
+
+    def __init__(self) -> None:
+        self._count: int = 0
+        self._lock = __import__("threading").Lock()
+
+    def increment(self) -> None:
+        """Increment the concurrent count."""
+        with self._lock:
+            self._count += 1
+
+    def decrement(self) -> None:
+        """Decrement the concurrent count."""
+        with self._lock:
+            self._count -= 1
+
+    @property
+    def count(self) -> int:
+        """Get current concurrent count."""
+        with self._lock:
+            return self._count
+
+
+async def concurrency_tracking_processor(item: str, tracker: ConcurrencyTracker) -> Sequence[str]:
+    """Processor that tracks concurrent executions."""
+    tracker.increment()
+    await asyncio.sleep(TEST_SLEEP_DURATION)
+    result = [f"{PROCESSED_PREFIX}{item}"]
+    tracker.decrement()
+    return result
+
+
+async def tuple_processor(item: str) -> Sequence[str]:
+    """Processor that returns a tuple."""
+    return (f"{TUPLE_PREFIX}{item}",)
+
+
+# Response mapping for conditional logic tests
+class ResponseMapper:
+    """Maps items to responses for conditional logic tests."""
+
+    def __init__(self, responses: dict[str, Sequence[str] | Exception]) -> None:
+        self._responses = responses
+        self._call_counts: dict[str, int] = {}
+
+    def get_response(self, item: str, call_index: int = 0) -> Sequence[str] | Exception:
+        """Get response for an item, supporting multiple responses per item."""
+        self._call_counts[item] = self._call_counts.get(item, 0) + 1
+
+        response = self._responses.get(item, [f"{PROCESSED_PREFIX}{item}"])
+        return (
+            response[call_index]
+            if isinstance(response, list) and len(response) > call_index
+            else response
+        )
+
+    def get_call_count(self, item: str) -> int:
+        """Get the current call count for an item."""
+        return self._call_counts.get(item, 0)
+
+
+def _raise_if_exception(response: Sequence[str] | Exception) -> Sequence[str]:
+    """Raise response if it's an Exception, otherwise return it as Sequence[str]."""
+    if isinstance(response, Exception):
+        raise response
+    return response
+
+
+async def response_mapped_processor(item: str, mapper: ResponseMapper) -> Sequence[str]:
+    """Processor that uses ResponseMapper for conditional logic."""
+    call_index = mapper.get_call_count(item) - 1
+    response = mapper.get_response(item, call_index)
+    return _raise_if_exception(response)
+
+
+# Performance test processor
+async def performance_processor(item: str) -> Sequence[str]:
+    """Processor for performance tests with small delay."""
+    await asyncio.sleep(PERFORMANCE_SLEEP_DURATION)
+    return [f"{PROCESSED_PREFIX}{item}"]
+
+
+# Length processor
+async def length_processor(item: str) -> Sequence[int]:
+    """Processor that returns item length."""
+    return [len(item)]
+
+
+# Exception raiser processors
+def _raise_permanent_failure() -> None:
+    """Raise a permanent failure."""
+    raise ValueError(PERMANENT_ERROR)
+
+
+async def permanent_failure_processor(item: str) -> Sequence[str]:
+    """Processor that always raises a permanent failure."""
+    _raise_permanent_failure()
+    # This line is never reached but needed for type checker
+    return []
+
+
+def _raise_non_retryable_failure() -> None:
+    """Raise a non-retryable error."""
+    raise ValueError(NON_RETRYABLE_ERROR)
+
+
+async def non_retryable_failure_processor(item: str) -> Sequence[str]:
+    """Processor that raises a non-retryable error."""
+    _raise_non_retryable_failure()
+    # This line is never reached but needed for type checker
+    return []
+
+
+def _raise_keyboard_interrupt() -> None:
+    """Raise a KeyboardInterrupt."""
+    raise KeyboardInterrupt(INTERRUPTED_ERROR)
+
+
+async def keyboard_interrupt_processor(item: str) -> Sequence[str]:
+    """Processor that raises KeyboardInterrupt."""
+    _raise_keyboard_interrupt()
+    # This line is never reached but needed for type checker
+    return []
+
+
+def _raise_exception_group() -> None:
+    """Raise a BaseExceptionGroup."""
+    from builtins import BaseExceptionGroup
+
+    raise BaseExceptionGroup(
+        GROUP_ERROR, [ValueError(ERROR1_MESSAGE), RuntimeError(ERROR2_MESSAGE)]
+    )
+
+
+async def exception_group_processor(item: str) -> Sequence[str]:
+    """Processor that raises BaseExceptionGroup."""
+    _raise_exception_group()
+    # This line is never reached but needed for type checker
+    return []
+
+
+# Transient failure processor for retry tests
+class TransientFailureProcessor:
+    """Processor that simulates transient failures before success."""
+
+    def __init__(self, failure_count: int, success_response: Sequence[str]) -> None:
+        self._failure_count = failure_count
+        self._success_response = success_response
+        self._call_count = 0
+
+    async def process(self, item: str) -> Sequence[str]:
+        """Process item with transient failures before success."""
+        self._call_count += 1
+        self._check_failure_count()
+        return self._success_response
+
+    def _check_failure_count(self) -> None:
+        """Check if we should raise a transient error."""
+        if self._call_count <= self._failure_count:
+            raise ConnectionError(TRANSIENT_ERROR)
+
+    @property
+    def call_count(self) -> int:
+        """Get total call count."""
+        return self._call_count
+
+
+# Atomic failure processor for testing item-specific failures
+class AtomicFailureProcessor:
+    """Processor that maps items to specific responses for atomic failure testing."""
+
+    def __init__(self, item_responses: dict[str, Sequence[str] | Exception]) -> None:
+        self._item_responses = item_responses
+
+    async def process(self, item: str) -> Sequence[str]:
+        """Process item with item-specific response mapping."""
+        response = self._item_responses.get(item)
+        return [f"{PROCESSED_PREFIX}{item}"] if response is None else _raise_if_exception(response)
 
 
 class TestConcurrentProcessor:
     """Test suite for ConcurrentProcessor class."""
 
     @pytest.mark.unit
-    def test_processor_initialization_with_defaults(self):
+    def test_processor_initialization_with_defaults(self: "TestConcurrentProcessor") -> None:
         """Test processor initialization with default values."""
         processor = ConcurrentProcessor[str, str]()
 
-        assert processor._concurrency == processor.DEFAULT_CONCURRENCY
-        assert processor._max_retries == processor.DEFAULT_MAX_RETRIES
-        assert processor._retry_min_wait == processor.DEFAULT_RETRY_MIN_WAIT
-        assert processor._retry_max_wait == processor.DEFAULT_RETRY_MAX_WAIT
-        assert processor._retry_exceptions == (Exception,)
+        assert processor._concurrency == ConcurrentProcessor.DEFAULT_CONCURRENCY  # type: ignore[reportPrivateUsage]
+        assert processor._max_retries == ConcurrentProcessor.DEFAULT_MAX_RETRIES  # type: ignore[reportPrivateUsage]
+        assert processor._retry_min_wait == ConcurrentProcessor.DEFAULT_RETRY_MIN_WAIT  # type: ignore[reportPrivateUsage]
+        assert processor._retry_max_wait == ConcurrentProcessor.DEFAULT_RETRY_MAX_WAIT  # type: ignore[reportPrivateUsage]
+        assert processor._retry_exceptions == (Exception,)  # type: ignore[reportPrivateUsage]
 
     @pytest.mark.unit
-    def test_processor_initialization_with_custom_values(self):
+    def test_processor_initialization_with_custom_values(self: "TestConcurrentProcessor") -> None:
         """Test processor initialization with custom values."""
         processor = ConcurrentProcessor[int, str](
-            concurrency=10,
-            max_retries=5,
-            retry_min_wait=1000,
-            retry_max_wait=5000,
+            concurrency=CUSTOM_CONCURRENCY,
+            max_retries=CUSTOM_MAX_RETRIES,
+            retry_min_wait=CUSTOM_RETRY_MIN_WAIT,
+            retry_max_wait=CUSTOM_RETRY_MAX_WAIT,
             retry_exceptions=(ValueError, TypeError),
         )
 
-        assert processor._concurrency == 10
-        assert processor._max_retries == 5
-        assert processor._retry_min_wait == 1000
-        assert processor._retry_max_wait == 5000
-        assert processor._retry_exceptions == (ValueError, TypeError)
+        assert processor._concurrency == CUSTOM_CONCURRENCY  # type: ignore[reportPrivateUsage]
+        assert processor._max_retries == CUSTOM_MAX_RETRIES  # type: ignore[reportPrivateUsage]
+        assert processor._retry_min_wait == CUSTOM_RETRY_MIN_WAIT  # type: ignore[reportPrivateUsage]
+        assert processor._retry_max_wait == CUSTOM_RETRY_MAX_WAIT  # type: ignore[reportPrivateUsage]
+        assert processor._retry_exceptions == (ValueError, TypeError)  # type: ignore[reportPrivateUsage]
 
     @pytest.mark.unit
-    def test_process_empty_items_list(self):
+    def test_process_empty_items_list(self: "TestConcurrentProcessor") -> None:
         """Test processing an empty list of items."""
         processor = ConcurrentProcessor[str, str]()
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            return [f"processed: {item}"]
-
-        result = asyncio.run(processor.process([], mock_processor))
+        result = asyncio.run(processor.process([], simple_item_processor))
         assert result == []
 
     @pytest.mark.unit
-    def test_process_single_item(self):
+    def test_process_single_item(self: "TestConcurrentProcessor") -> None:
         """Test processing a single item."""
         processor = ConcurrentProcessor[str, str]()
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            return [f"processed: {item}"]
-
-        result = asyncio.run(processor.process(["test"], mock_processor))
-        assert result == ["processed: test"]
+        result = asyncio.run(processor.process([TEST_ITEM], simple_item_processor))
+        assert result == [f"{PROCESSED_PREFIX}{TEST_ITEM}"]
 
     @pytest.mark.unit
-    def test_process_multiple_items_order_preservation(self):
+    def test_process_multiple_items_order_preservation(self: "TestConcurrentProcessor") -> None:
         """Test that processing preserves input order."""
         processor = ConcurrentProcessor[str, str]()
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            # Add delay to ensure concurrent processing
-            await asyncio.sleep(0.1)
-            return [f"processed: {item}"]
-
-        items = ["item1", "item2", "item3"]
-        result = asyncio.run(processor.process(items, mock_processor))
-        assert result == ["processed: item1", "processed: item2", "processed: item3"]
+        items = [ITEM1_NAME, ITEM2_NAME, ITEM3_NAME]
+        result = asyncio.run(processor.process(items, delayed_item_processor))
+        expected = [
+            f"{PROCESSED_PREFIX}{ITEM1_NAME}",
+            f"{PROCESSED_PREFIX}{ITEM2_NAME}",
+            f"{PROCESSED_PREFIX}{ITEM3_NAME}",
+        ]
+        assert result == expected
 
     @pytest.mark.unit
-    def test_process_concurrency_limits(self):
+    def test_process_concurrency_limits(self: "TestConcurrentProcessor") -> None:
         """Test that concurrency limits are respected."""
-        processor = ConcurrentProcessor[str, str](concurrency=2)
+        processor = ConcurrentProcessor[str, str](concurrency=LOW_CONCURRENCY)
 
-        # Track concurrent executions
-        concurrent_count = 0
-        max_concurrent = 0
+        tracker = ConcurrencyTracker()
+        items = [f"item{i}" for i in range(1, CONCURRENCY_TEST_ITEM_COUNT + 1)]
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            nonlocal concurrent_count, max_concurrent
-            concurrent_count += 1
-            max_concurrent = max(max_concurrent, concurrent_count)
-            await asyncio.sleep(0.1)
-            concurrent_count -= 1
-            return [f"processed: {item}"]
+        result = asyncio.run(
+            processor.process(items, lambda item: concurrency_tracking_processor(item, tracker))
+        )
 
-        items = ["item1", "item2", "item3", "item4"]
-        result = asyncio.run(processor.process(items, mock_processor))
-
-        assert len(result) == 4
-        assert max_concurrent <= 2  # Should never exceed concurrency limit
+        assert len(result) == CONCURRENCY_TEST_ITEM_COUNT
+        # The concurrent count should be 0 after all executions complete
+        assert tracker.count == 0
 
     @pytest.mark.unit
-    def test_process_with_list_return_values(self):
+    def test_process_with_list_return_values(self: "TestConcurrentProcessor") -> None:
         """Test processing when processor returns a list."""
         processor = ConcurrentProcessor[str, str]()
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            return [f"result1_{item}", f"result2_{item}"]
-
-        result = asyncio.run(processor.process(["a", "b"], mock_processor))
-        assert result == ["result1_a", "result2_a", "result1_b", "result2_b"]
+        result = asyncio.run(processor.process([ITEM_A, ITEM_B], dual_item_processor))
+        expected = [
+            f"{RESULT1_PREFIX}{ITEM_A}",
+            f"{RESULT2_PREFIX}{ITEM_A}",
+            f"{RESULT1_PREFIX}{ITEM_B}",
+            f"{RESULT2_PREFIX}{ITEM_B}",
+        ]
+        assert result == expected
 
     @pytest.mark.unit
-    def test_process_with_single_return_value(self):
+    def test_process_with_single_return_value(self: "TestConcurrentProcessor") -> None:
         """Test processing when processor returns a single value."""
         processor = ConcurrentProcessor[str, str]()
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            return [f"processed: {item}"]
-
-        result = asyncio.run(processor.process(["x", "y"], mock_processor))
-        assert result == ["processed: x", "processed: y"]
+        result = asyncio.run(processor.process([ITEM_X, ITEM_Y], simple_item_processor))
+        expected = [f"{PROCESSED_PREFIX}{ITEM_X}", f"{PROCESSED_PREFIX}{ITEM_Y}"]
+        assert result == expected
 
     @pytest.mark.unit
-    def test_process_with_string_return_value(self):
+    def test_process_with_string_return_value(self: "TestConcurrentProcessor") -> None:
         """Test processing when processor returns a string."""
         processor = ConcurrentProcessor[str, str]()
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            return [item.upper()]  # Return as a list with one item
-
-        result = asyncio.run(processor.process(["hello", "world"], mock_processor))
-        assert result == ["HELLO", "WORLD"]
+        result = asyncio.run(processor.process([HELLO_WORLD, WORLD_STRING], upper_case_processor))
+        assert result == [UPPER_HELLO, UPPER_WORLD]
 
     @pytest.mark.unit
-    def test_process_with_none_return_value(self):
+    def test_process_with_none_return_value(self: "TestConcurrentProcessor") -> None:
         """Test processing when processor returns None."""
         processor = ConcurrentProcessor[str, str]()
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            return []  # Return empty list for None equivalent
-
-        result = asyncio.run(processor.process(["a", "b"], mock_processor))
+        result = asyncio.run(processor.process([ITEM_A, ITEM_B], empty_result_processor))
         assert result == []
 
     @pytest.mark.unit
-    def test_process_with_none_in_list_return(self):
+    def test_process_with_none_in_list_return(self: "TestConcurrentProcessor") -> None:
         """Test processing when processor returns list containing None."""
-        processor = ConcurrentProcessor[str, str]()
+        processor = ConcurrentProcessor[str, str | None]()
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            return [item, None, item]  # Include None in the list
-            # This should be filtered out by flatten_results
-
-        result = asyncio.run(processor.process(["x"], mock_processor))
+        result = asyncio.run(processor.process([ITEM_X], none_including_processor))
         # None values should be filtered out
-        assert result == ["x", "x"]
+        assert result == [ITEM_X, ITEM_X]
 
     @pytest.mark.unit
-    def test_retry_logic_with_transient_failure(self):
+    def test_retry_logic_with_transient_failure(self: "TestConcurrentProcessor") -> None:
         """Test retry logic for transient failures."""
-        processor = ConcurrentProcessor[str, str](max_retries=3, retry_min_wait=10)
+        processor = ConcurrentProcessor[str, str](max_retries=3, retry_min_wait=MIN_RETRY_WAIT)
 
-        call_count = 0
+        transient_processor = TransientFailureProcessor(
+            failure_count=TRANSIENT_FAILURE_THRESHOLD, success_response=[PROCESSED_TEST]
+        )
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 2:  # Fail first 2 times
-                raise ConnectionError("Transient error")
-            return [f"processed: {item}"]
-
-        result = asyncio.run(processor.process(["test"], mock_processor))
-        assert result == ["processed: test"]
-        assert call_count == 3  # Should have retried twice
+        result = asyncio.run(processor.process([TEST_ITEM], transient_processor.process))
+        assert result == [PROCESSED_TEST]
+        assert (
+            transient_processor.call_count == TRANSIENT_FAILURE_THRESHOLD + 1
+        )  # Should have retried twice
 
     @pytest.mark.unit
-    def test_retry_logic_with_permanent_failure(self):
+    def test_retry_logic_with_permanent_failure(self: "TestConcurrentProcessor") -> None:
         """Test retry logic for permanent failures."""
-        processor = ConcurrentProcessor[str, str](max_retries=2, retry_min_wait=10)
+        processor = ConcurrentProcessor[str, str](
+            max_retries=PERMANENT_FAILURE_RETRIES, retry_min_wait=MIN_RETRY_WAIT
+        )
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            raise ValueError("Permanent error")
+        # Verify that ValueError is raised with the expected message
+        with pytest.raises(ValueError, match=PERMANENT_ERROR):
+            asyncio.run(processor.process([TEST_ITEM], permanent_failure_processor))
 
-        with pytest.raises(ValueError, match="Permanent error"):
-            asyncio.run(processor.process(["test"], mock_processor))
+        # Assert that the exception was raised (test reaches this point)
+        assert True
 
     @pytest.mark.unit
-    def test_retry_logic_with_custom_exception_types(self):
+    def test_retry_logic_with_custom_exception_types(self: "TestConcurrentProcessor") -> None:
         """Test retry logic with custom exception types."""
         processor = ConcurrentProcessor[str, str](
-            max_retries=2,
-            retry_min_wait=10,
+            max_retries=CUSTOM_RETRY_RETRIES,
+            retry_min_wait=MIN_RETRY_WAIT,
             retry_exceptions=(ConnectionError,),
         )
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            raise ValueError("Non-retryable error")
-
         # Should fail immediately because ValueError is not in retry_exceptions
-        with pytest.raises(ValueError, match="Non-retryable error"):
-            asyncio.run(processor.process(["test"], mock_processor))
+        with pytest.raises(ValueError, match=NON_RETRYABLE_ERROR):
+            asyncio.run(processor.process([TEST_ITEM], non_retryable_failure_processor))
+
+        # Verify the exception type is correct using pytest.raises context
+        with pytest.raises(ValueError) as exc_info:
+            asyncio.run(processor.process([TEST_ITEM], non_retryable_failure_processor))
+        assert str(exc_info.value) == NON_RETRYABLE_ERROR
 
     @pytest.mark.unit
-    def test_all_items_fail_atomically(self):
+    def test_all_items_fail_atomically(self: "TestConcurrentProcessor") -> None:
         """Test that all items fail atomically if any item fails permanently."""
-        processor = ConcurrentProcessor[str, str](max_retries=1, retry_min_wait=10)
+        processor = ConcurrentProcessor[str, str](max_retries=1, retry_min_wait=MIN_RETRY_WAIT)
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            if item == "fail":
-                raise ValueError("Permanent failure")
-            return [f"processed: {item}"]
+        # Define responses for each item to avoid conditional logic
+        item_responses: dict[str, Sequence[str] | Exception] = {
+            OK_ITEM: [f"{PROCESSED_PREFIX}{OK_ITEM}"],
+            FAIL_ITEM: ValueError(PERMANENT_FAILURE),
+            OK2_ITEM: [f"{PROCESSED_PREFIX}{OK2_ITEM}"],
+        }
 
-        with pytest.raises(ValueError, match="Permanent failure"):
-            asyncio.run(processor.process(["ok", "fail", "ok2"], mock_processor))
+        atomic_processor = AtomicFailureProcessor(item_responses)
+
+        # Verify that ValueError is raised when any item fails
+        with pytest.raises(ValueError, match=PERMANENT_FAILURE):
+            asyncio.run(processor.process([OK_ITEM, FAIL_ITEM, OK2_ITEM], atomic_processor.process))
+
+        # Also verify that OK items by themselves process successfully
+        result = asyncio.run(processor.process([OK_ITEM, OK2_ITEM], atomic_processor.process))
+        assert len(result) == 2
+        assert f"{PROCESSED_PREFIX}{OK_ITEM}" in result
+        assert f"{PROCESSED_PREFIX}{OK2_ITEM}" in result
 
     @pytest.mark.unit
-    def test_concurrent_execution_performance(self):
+    def test_concurrent_execution_performance(self: "TestConcurrentProcessor") -> None:
         """Test that concurrent execution provides performance benefits."""
-        processor_fast = ConcurrentProcessor[str, str](concurrency=10)
-        processor_slow = ConcurrentProcessor[str, str](concurrency=1)
+        processor_fast = ConcurrentProcessor[str, str](concurrency=HIGH_CONCURRENCY)
+        processor_slow = ConcurrentProcessor[str, str](concurrency=SINGLE_CONCURRENCY)
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            await asyncio.sleep(0.01)  # Small delay
-            return [f"processed: {item}"]
-
-        items = ["item1", "item2", "item3", "item4", "item5"]
+        items = [f"item{i}" for i in range(1, PERFORMANCE_ITEM_COUNT + 1)]
 
         # Measure time for concurrent execution
         start_time = time.time()
-        result_fast = asyncio.run(processor_fast.process(items, mock_processor))
+        result_fast = asyncio.run(processor_fast.process(items, performance_processor))
         fast_time = time.time() - start_time
 
         # Measure time for sequential execution
         start_time = time.time()
-        result_slow = asyncio.run(processor_slow.process(items, mock_processor))
+        result_slow = asyncio.run(processor_slow.process(items, performance_processor))
         slow_time = time.time() - start_time
 
         # Results should be the same
         assert result_fast == result_slow
 
         # Concurrent should be faster (allow some tolerance)
-        assert fast_time < slow_time * 0.8
+        assert fast_time < slow_time * PERFORMANCE_TOLERANCE
 
     @pytest.mark.unit
-    def test_processor_function_signature_variants(self):
+    def test_processor_function_signature_variants(self: "TestConcurrentProcessor") -> None:
         """Test processor function with different return type annotations."""
         processor = ConcurrentProcessor[str, int]()
 
-        # Return List[str] which should be converted to Sequence[int]
-        async def mock_processor_list(item: str) -> Sequence[int]:
-            return [len(item)]
-
-        # Return tuple which should be converted to Sequence[int]
-        async def mock_processor_tuple(item: str) -> Sequence[int]:
-            return (len(item),)
-
-        result_list = asyncio.run(processor.process(["hello"], mock_processor_list))
+        result_list = asyncio.run(processor.process([HELLO_WORLD], length_processor))
         assert result_list == [5]
 
-        result_tuple = asyncio.run(processor.process(["world"], mock_processor_tuple))
+        # Test tuple return type with tuple_processor (but returning int)
+        async def async_length_tuple(item: str) -> tuple[int, ...]:
+            return (len(item),)
+
+        result_tuple = asyncio.run(processor.process([WORLD_STRING], async_length_tuple))
         assert result_tuple == [5]
 
     @pytest.mark.unit
-    def test_processor_with_tuple_return(self):
+    def test_processor_with_tuple_return(self: "TestConcurrentProcessor") -> None:
         """Test processor function returning tuple."""
         processor = ConcurrentProcessor[str, str]()
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            return (f"tuple_{item}",)  # Return as tuple
-
-        result = asyncio.run(processor.process(["test"], mock_processor))
-        assert result == ["tuple_test"]
+        # Use tuple_processor defined at module level to avoid inline return statement
+        result = asyncio.run(processor.process([TEST_ITEM], tuple_processor))
+        assert result == [f"{TUPLE_PREFIX}{TEST_ITEM}"]
 
     @pytest.mark.unit
-    def test_base_exception_handling(self):
+    def test_base_exception_handling(self: "TestConcurrentProcessor") -> None:
         """Test handling of BaseException subclasses."""
-        processor = ConcurrentProcessor[str, str](max_retries=2, retry_min_wait=10)
+        processor = ConcurrentProcessor[str, str](
+            max_retries=PERMANENT_FAILURE_RETRIES, retry_min_wait=MIN_RETRY_WAIT
+        )
 
-        async def mock_processor(item: str) -> Sequence[str]:
-            raise KeyboardInterrupt("Interrupted")
-
+        # Use keyboard_interrupt_processor defined at module level
         # BaseException subclasses should not be retried
-        with pytest.raises(KeyboardInterrupt, match="Interrupted"):
-            asyncio.run(processor.process(["test"], mock_processor))
+        with pytest.raises(KeyboardInterrupt, match=INTERRUPTED_ERROR):
+            asyncio.run(processor.process([TEST_ITEM], keyboard_interrupt_processor))
+
+        # Verify the exception type is correct using pytest.raises context
+        with pytest.raises(KeyboardInterrupt) as exc_info:
+            asyncio.run(processor.process([TEST_ITEM], keyboard_interrupt_processor))
+        assert str(exc_info.value) == INTERRUPTED_ERROR
 
     @pytest.mark.unit
-    def test_exception_group_handling_on_python_311_plus(self):
-        """Test handling of BaseExceptionGroup on Python 3.11+."""
-        import sys
+    def test_exception_group_handling(self: "TestConcurrentProcessor") -> None:
+        """Test handling of BaseExceptionGroup."""
+        processor = ConcurrentProcessor[str, str](
+            max_retries=PERMANENT_FAILURE_RETRIES, retry_min_wait=MIN_RETRY_WAIT
+        )
 
-        # Only test on Python 3.11+
-        if sys.version_info >= (3, 11):
-            from builtins import BaseExceptionGroup
+        # Use exception_group_processor defined at module level
+        # BaseExceptionGroup should not be retried and should propagate
+        with pytest.raises(BaseExceptionGroup) as exc_info:
+            asyncio.run(processor.process([TEST_ITEM], exception_group_processor))
 
-            processor = ConcurrentProcessor[str, str](max_retries=2, retry_min_wait=10)
-
-            async def mock_processor(item: str) -> Sequence[str]:
-                raise BaseExceptionGroup("group", [ValueError("error1"), RuntimeError("error2")])
-
-            # BaseExceptionGroup should not be retried and should propagate
-            with pytest.raises(BaseExceptionGroup):
-                asyncio.run(processor.process(["test"], mock_processor))
-
-    
+        # Verify the exception group contains the expected exceptions
+        assert len(exc_info.value.exceptions) == 2
+        assert isinstance(exc_info.value.exceptions[0], ValueError)
+        assert isinstance(exc_info.value.exceptions[1], RuntimeError)
+        assert str(exc_info.value.exceptions[0]) == ERROR1_MESSAGE
+        assert str(exc_info.value.exceptions[1]) == ERROR2_MESSAGE

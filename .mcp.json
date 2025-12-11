@@ -7,49 +7,23 @@
                 "Authorization": "Bearer ${Z_AI_API_KEY}"
             }
         },
-        "chrome-devtools": {
-            "type": "stdio",
-            "command": "npx",
-            "args": [
-                "chrome-devtools-mcp@latest"
-            ],
-            "env": {}
-        },
-        "serena": {
-            "type": "stdio",
-            "command": "uvx",
-            "args": [
-                "--from",
-                "git+https://github.com/oraios/serena",
-                "serena",
-                "start-mcp-server",
-                "--context",
-                "ide-assistant",
-                "--project",
-                "."
-            ],
-            "env": {}
-        },
-        "code_analysis": {
-            "type": "stdio",
-            "command": "npx",
-            "args": [
-                "cclsp@latest"
-            ],
-            "env": {
-                "CCLSP_CONFIG_PATH": ".claude/cclsp.json"
+        "website-reader": {
+            "type": "http",
+            "url": "https://api.z.ai/api/mcp/web_reader/mcp",
+            "headers": {
+                "Authorization": "Bearer ${Z_AI_API_KEY}"
             }
+        },
+        "langwatch": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "@langwatch/mcp-server"
+            ]
         },
         "agno": {
             "type": "http",
             "url": "https://docs.agno.com/mcp"
-        },
-        "shadcn": {
-            "command": "npx",
-            "args": [
-                "shadcn@latest",
-                "mcp"
-            ]
         },
         "image-analysis": {
             "type": "stdio",

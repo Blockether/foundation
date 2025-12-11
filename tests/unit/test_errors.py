@@ -10,14 +10,14 @@ class CustomTestError(FoundationBaseError):
 
 
 @pytest.mark.unit
-def test_error_having_auto_solidity_like_message():
+def test_error_having_auto_solidity_like_message() -> None:
     """Test error string format matches Solidity-like pattern."""
     error = CustomTestError("Test error occurred")
     assert str(error) == "test_errors.CustomTestError: Test error occurred"
 
 
 @pytest.mark.unit
-def test_error_with_details():
+def test_error_with_details() -> None:
     """Test error string representation with details (covers lines 33-34)."""
     from pydantic import BaseModel
 
@@ -35,28 +35,28 @@ def test_error_with_details():
 
 
 @pytest.mark.unit
-def test_error_inheritance():
+def test_error_inheritance() -> None:
     """Test that custom errors properly inherit from FoundationBaseError."""
     error = CustomTestError("Test error")
     assert isinstance(error, FoundationBaseError)
 
 
 @pytest.mark.unit
-def test_error_without_details():
+def test_error_without_details() -> None:
     """Test error with no additional details."""
     error = CustomTestError("Simple error")
     assert str(error) == "test_errors.CustomTestError: Simple error"
 
 
 @pytest.mark.unit
-def test_error_with_none_details():
+def test_error_with_none_details() -> None:
     """Test error with None details."""
     error = CustomTestError("Test error", details=None)
     assert str(error) == "test_errors.CustomTestError: Test error"
 
 
 @pytest.mark.unit
-def test_consensus_field_init_error_initializes_base_fields():
+def test_consensus_field_init_error_initializes_base_fields() -> None:
     """Ensure ConsensusFieldInitError calls FoundationBaseError constructor."""
 
     error = ConsensusFieldInitError("Invalid consensus field")

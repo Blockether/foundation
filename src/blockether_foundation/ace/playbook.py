@@ -10,7 +10,7 @@ from textwrap import dedent
 
 from pydantic import Field
 
-from .models.base import BaseModelFilePersistable
+from ..models import BaseModelSerializable
 from .models.playbook import (
     BaseSectionEntry,
     GroundTruth,
@@ -22,10 +22,8 @@ from .models.playbook import (
 __SEED_DETERMINISTIC_COMPONENT__ = 29
 
 
-class Playbook(BaseModelFilePersistable):
-    name: str = Field(
-        default="Default Agent Playbook", description="Name of the playbook"
-    )
+class Playbook(BaseModelSerializable):
+    name: str = Field(default="Default Agent Playbook", description="Name of the playbook")
 
     overview: PlaybookHighLevelOverview = PlaybookHighLevelOverview(
         description="This playbook provides a structured set of hypotheses, guidelines, and best practices to create agents that can dynamically adapt their capabilities based on <USER_REQUEST> at hand. It aims to enhance agent performance by leveraging domain knowledge and proven patterns.",
@@ -111,9 +109,7 @@ class Playbook(BaseModelFilePersistable):
         {"".join([entry.to_markdown() for entry in self._sort_by_metadata(entries)])}"""
 
     def _sections_to_markdown(self) -> str:
-        ground_truths_md = self._section_to_markdown(
-            "Ground Truths", self.ground_truths
-        )
+        ground_truths_md = self._section_to_markdown("Ground Truths", self.ground_truths)
 
         has_content = len(ground_truths_md.strip()) > 0
         if not has_content:
@@ -155,9 +151,7 @@ class Playbook(BaseModelFilePersistable):
         </PLAYBOOK>"""
         )
 
-    def _sort_by_metadata(
-        self, entries: Sequence[BaseSectionEntry]
-    ) -> list[BaseSectionEntry]:
+    def _sort_by_metadata(self, entries: Sequence[BaseSectionEntry]) -> list[BaseSectionEntry]:
         """Sort entries by metadata statistics: helpful, harmful, neutral.
 
         Args:

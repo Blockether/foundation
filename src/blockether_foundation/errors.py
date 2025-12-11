@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TypeVar
+from typing import TypeVar, override
 
 from pydantic import BaseModel
 
@@ -25,6 +25,7 @@ class FoundationBaseError(Exception):
         self.details = details
         self.timestamp = datetime.now(UTC)
 
+    @override
     def __str__(self) -> str:
         """String representation for error messages."""
         if self.details and isinstance(self.details, BaseModel):

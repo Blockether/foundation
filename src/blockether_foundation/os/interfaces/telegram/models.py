@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class BotConfig(BaseModel):
@@ -23,11 +23,23 @@ class BotConfig(BaseModel):
 
 
 class Update(BaseModel):
-    """Simplified Telegram update model for basic validation."""
+    model_config = ConfigDict(extra="ignore")
 
     update_id: int
     message: dict[str, Any] | None = None
+    edited_message: dict[str, Any] | None = None
+    channel_post: dict[str, Any] | None = None
+    edited_channel_post: dict[str, Any] | None = None
+    inline_query: dict[str, Any] | None = None
+    chosen_inline_result: dict[str, Any] | None = None
     callback_query: dict[str, Any] | None = None
+    shipping_query: dict[str, Any] | None = None
+    pre_checkout_query: dict[str, Any] | None = None
+    poll: dict[str, Any] | None = None
+    poll_answer: dict[str, Any] | None = None
+    my_chat_member: dict[str, Any] | None = None
+    chat_member: dict[str, Any] | None = None
+    chat_join_request: dict[str, Any] | None = None
 
 
 class WebhookResponse(BaseModel):

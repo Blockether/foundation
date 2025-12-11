@@ -4,12 +4,19 @@ from queue import Empty
 
 import pytest
 
-from blockether_foundation.runtime.aws_lambda import background_tasks as background_tasks_module
-from blockether_foundation.runtime.aws_lambda.background_tasks import (
+from blockether_foundation.os.runtime.aws_lambda import background_tasks as background_tasks_module
+from blockether_foundation.os.runtime.aws_lambda.background_tasks import (
     LambdaBackgroundTaskExtension,
 )
 
 
+@pytest.fixture(autouse=True)
+def reset_singleton() -> None:
+    """Reset the singleton instance before each test."""
+    LambdaBackgroundTaskExtension._reset_singleton()
+
+
+@pytest.mark.unit
 def test_extension_requires_runtime_api(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AWS_LAMBDA_RUNTIME_API", raising=False)
 
@@ -17,6 +24,7 @@ def test_extension_requires_runtime_api(monkeypatch: pytest.MonkeyPatch) -> None
         LambdaBackgroundTaskExtension()
 
 
+@pytest.mark.unit
 def test_add_task_enqueues_when_runtime_available(monkeypatch: pytest.MonkeyPatch) -> None:
     started = False
 
@@ -45,6 +53,7 @@ def test_add_task_enqueues_when_runtime_available(monkeypatch: pytest.MonkeyPatc
     assert kwargs == {}
 
 
+@pytest.mark.unit
 def test_done_enqueues_completion_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_LAMBDA_RUNTIME_API", "localhost:9001")
     monkeypatch.setattr(LambdaBackgroundTaskExtension, "start", lambda self: None)
@@ -57,6 +66,7 @@ def test_done_enqueues_completion_marker(monkeypatch: pytest.MonkeyPatch) -> Non
     assert message["type"] == "DONE"
 
 
+@pytest.mark.unit
 def test_drain_queue_executes_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_LAMBDA_RUNTIME_API", "localhost:9001")
     monkeypatch.setattr(LambdaBackgroundTaskExtension, "start", lambda self: None)
@@ -83,6 +93,7 @@ def _make_enabled_extension(monkeypatch: pytest.MonkeyPatch) -> LambdaBackground
     return LambdaBackgroundTaskExtension()
 
 
+@pytest.mark.unit
 def test_register_extension_returns_identifier(monkeypatch: pytest.MonkeyPatch) -> None:
     # Create extension manually with minimal initialization to avoid HTTP calls
     extension = LambdaBackgroundTaskExtension.__new__(LambdaBackgroundTaskExtension)
@@ -109,6 +120,7 @@ def test_register_extension_returns_identifier(monkeypatch: pytest.MonkeyPatch) 
     assert extension._extension_id == "ext-id"
 
 
+@pytest.mark.unit
 def test_register_extension_without_identifier_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     # Create extension manually with minimal initialization to avoid HTTP calls
     extension = LambdaBackgroundTaskExtension.__new__(LambdaBackgroundTaskExtension)
@@ -136,6 +148,7 @@ def test_register_extension_without_identifier_raises(monkeypatch: pytest.Monkey
         extension._register_extension()
 
 
+@pytest.mark.unit
 def test_next_event_returns_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     extension = _make_enabled_extension(monkeypatch)
     extension._extension_id = "ext-id"
@@ -158,6 +171,7 @@ def test_next_event_returns_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     assert event == {"eventType": "INVOKE"}
 
 
+@pytest.mark.unit
 def test_next_event_handles_url_error(monkeypatch: pytest.MonkeyPatch) -> None:
     extension = _make_enabled_extension(monkeypatch)
     extension._extension_id = "ext-id"
@@ -170,6 +184,7 @@ def test_next_event_handles_url_error(monkeypatch: pytest.MonkeyPatch) -> None:
     assert extension._next_event() is None
 
 
+@pytest.mark.unit
 def test_run_handles_register_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     # Create extension manually with minimal initialization to avoid HTTP calls
     extension = LambdaBackgroundTaskExtension.__new__(LambdaBackgroundTaskExtension)
@@ -194,6 +209,7 @@ def test_run_handles_register_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     assert extension._extension_id is None
 
 
+@pytest.mark.unit
 def test_run_method_handles_invoke_event(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that the run method correctly processes INVOKE events."""
     # Create extension manually with minimal initialization to avoid HTTP calls
@@ -230,6 +246,7 @@ def test_run_method_handles_invoke_event(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(drain_calls) == 1
 
 
+@pytest.mark.unit
 def test_run_method_ignores_unknown_event_type(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that the run method ignores unknown event types."""
     extension = LambdaBackgroundTaskExtension.__new__(LambdaBackgroundTaskExtension)
@@ -258,6 +275,7 @@ def test_run_method_ignores_unknown_event_type(monkeypatch: pytest.MonkeyPatch) 
     assert len(drain_calls) == 0  # Should not be called for unknown event types
 
 
+@pytest.mark.unit
 def test_drain_queue_handles_task_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test _drain_queue_until_done handles task execution failures."""
     extension = LambdaBackgroundTaskExtension.__new__(LambdaBackgroundTaskExtension)
@@ -280,6 +298,7 @@ def test_drain_queue_handles_task_failure(monkeypatch: pytest.MonkeyPatch) -> No
     assert extension.queue.empty()
 
 
+@pytest.mark.unit
 def test_drain_queue_handles_unknown_message_type(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test _drain_queue_until_done handles unknown message types."""
     extension = LambdaBackgroundTaskExtension.__new__(LambdaBackgroundTaskExtension)
@@ -297,3 +316,18 @@ def test_drain_queue_handles_unknown_message_type(monkeypatch: pytest.MonkeyPatc
 
     # Queue should be empty after processing
     assert extension.queue.empty()
+
+
+@pytest.mark.unit
+def test_singleton_returns_same_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that LambdaBackgroundTaskExtension returns the same instance."""
+    monkeypatch.setenv("AWS_LAMBDA_RUNTIME_API", "localhost:9001")
+    monkeypatch.setattr(LambdaBackgroundTaskExtension, "start", lambda self: None)
+    monkeypatch.setattr(LambdaBackgroundTaskExtension, "_register_extension", lambda self: None)
+
+    extension1 = LambdaBackgroundTaskExtension()
+    extension2 = LambdaBackgroundTaskExtension()
+
+    # Both should be the same instance
+    assert extension1 is extension2
+    assert id(extension1) == id(extension2)

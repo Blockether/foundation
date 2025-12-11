@@ -1,29 +1,34 @@
+# ignore-development
 """Minimal webhook handlers for Telegram interface."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol
-from urllib import error as urllib_error
-from urllib import request as urllib_request
 
 from agno.agent import Agent
 from agno.team import Team
 from agno.utils.log import logger
 from agno.workflow import Workflow
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+
+from blockether_foundation.audio import AudioTranscriber
 
 from .models import BotConfig, HealthResponse, Update, WebhookResponse
+
+# Type aliases for agno executor return types
+ExecutorResult = str | Any
 
 # Constants
 MAX_WEBHOOK_SIZE = 1024 * 1024  # 1MB
 EXECUTOR_TIMEOUT = 30  # seconds
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 TELEGRAM_MAX_MESSAGE_LENGTH = 4000
-TELEGRAM_MESSAGE_SPLIT_DELAY = 0.5
 
 
 class BackgroundTaskScheduler(Protocol):
@@ -38,6 +43,7 @@ class BackgroundTaskScheduler(Protocol):
         ...
 
 
+# public-api
 def attach_routes(
     router: APIRouter,
     executor: Agent | Team | Workflow | None,
@@ -45,24 +51,27 @@ def attach_routes(
     task_scheduler: BackgroundTaskScheduler | None = None,
     scheduler_managed_by_middleware: bool = False,
 ) -> APIRouter:
+    # ignore-development
     """Attach minimal Telegram webhook routes to the router."""
-    logger.info(f"Attaching routes for bot: {bot_config.name}")
+    logger.info(f"Attaching routes for bot: {bot_config.name}")  # type: ignore[arg-type]
 
     @router.post("/webhook", response_model=WebhookResponse)
     async def webhook(
         request: Request,
         background_tasks: BackgroundTasks,
-        x_telegram_bot_api_secret_token: str | None = Header(
-            None, alias="X-Telegram-Bot-Api-Secret-Token"
-        ),
+        x_telegram_bot_api_secret_token: str | None = None,
     ) -> WebhookResponse:
         """Handle Telegram webhook updates."""
         start_time = datetime.now(UTC)
-        logger.debug(f"Webhook received for bot {bot_config.name}")
+        logger.debug(f"Webhook received for bot {bot_config.name}")  # type: ignore[arg-type]
 
         try:
-            # 1. Verify webhook signature if configured
+            # 1. Get webhook signature header if configured
             if bot_config.webhook_secret:
+                # Get the header from request
+                x_telegram_bot_api_secret_token = request.headers.get(
+                    "X-Telegram-Bot-Api-Secret-Token"
+                )
                 if x_telegram_bot_api_secret_token != bot_config.webhook_secret:
                     logger.error("Webhook error (status=401): Unauthorized webhook request")
                     raise HTTPException(status_code=401, detail="Unauthorized")
@@ -87,7 +96,7 @@ def attach_routes(
 
             # 4. Basic validation and logging
             user_id = extract_user_id(update)
-            logger.info(f"Webhook received: update_id={update.update_id}, user_id={user_id}")
+            logger.info(f"Webhook received: update_id={update.update_id}, user_id={user_id}")  # type: ignore[arg-type]
 
             # 5. Process the update in background
             _schedule_update_processing(
@@ -98,7 +107,7 @@ def attach_routes(
                 task_scheduler=task_scheduler,
             )
 
-            logger.debug(f"Webhook for bot {bot_config.name} queued for processing")
+            logger.debug(f"Webhook for bot {bot_config.name} queued for processing")  # type: ignore[arg-type]
             return WebhookResponse(
                 status="ok",
                 update_id=update.update_id,
@@ -116,15 +125,15 @@ def attach_routes(
 
     @router.get("/health", response_model=HealthResponse)
     async def health_check() -> HealthResponse:
-        """Simple health check."""
-        logger.debug(f"Health check requested for bot {bot_config.name}")
+        """Health check endpoint."""
+        logger.debug(f"Health check requested for bot {bot_config.name}")  # type: ignore[arg-type]
         try:
             return HealthResponse(status="healthy", timestamp=datetime.now(UTC).isoformat())
         finally:
             if not scheduler_managed_by_middleware:
                 _notify_scheduler_done(task_scheduler, None)
 
-    logger.info(f"Routes attached successfully for bot {bot_config.name}")
+    logger.info(f"Routes attached successfully for bot {bot_config.name}")  # type: ignore[arg-type]
     return router
 
 
@@ -189,12 +198,16 @@ def get_access_denied_reason(user_id: int, bot_config: BotConfig) -> str:
     return f"User {user_id} access denied"
 
 
-def format_message_for_executor(update: Update) -> str:
+def format_message_for_executor(update: Update, transcription: str | None = None) -> str:
     """Format a Telegram update for the executor."""
     if update.message:
         user_info = update.message.get("from", {})
         chat_info = update.message.get("chat", {})
         message_text = update.message.get("text", "") or update.message.get("caption", "")
+
+        # Use transcription if available
+        if transcription:
+            message_text = f"{message_text}\n[Audio Transcription]: {transcription}".strip()
 
         user_display = user_info.get("first_name", "Unknown")
         user_id = user_info.get("id", 0)
@@ -243,12 +256,15 @@ async def process_update_async(
 
         # Log executor start
         executor_type = type(executor).__name__ if executor else "None"
-        logger.info(
+        logger.info(  # type: ignore[arg-type]
             f"Executor start: update_id={update.update_id}, user_id={user_id}, executor_type={executor_type}"
         )
 
+        # Check for audio/voice and transcribe if needed
+        transcription = await _transcribe_audio_if_present(update, bot_config.token)
+
         # Format message for executor
-        formatted_message = format_message_for_executor(update)
+        formatted_message = format_message_for_executor(update, transcription)
         chat_id = extract_chat_id(update)
 
         # Configure timeout
@@ -259,13 +275,14 @@ async def process_update_async(
             try:
                 # Use asyncio.wait_for to prevent blocking indefinitely
                 # Wrap the sync executor.run call in a lambda for asyncio.to_thread
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(lambda: executor.run(formatted_message)), timeout=timeout
+                result: ExecutorResult = await asyncio.wait_for(
+                    asyncio.to_thread(lambda: executor.run(formatted_message)),  # type: ignore[arg-type]
+                    timeout=timeout,
                 )
 
                 # Log successful completion
                 duration_ms = int((datetime.now(UTC) - start_time).total_seconds() * 1000)
-                logger.info(
+                logger.info(  # type: ignore[arg-type]
                     f"Executor complete: update_id={update.update_id}, duration_ms={duration_ms}, success=True"
                 )
 
@@ -375,7 +392,7 @@ def _extract_executor_reply_text(response: Any) -> str | None:
         if text:
             return text
     elif isinstance(content, list):
-        parts = [str(item).strip() for item in content if str(item).strip()]
+        parts: list[str] = [str(item).strip() for item in content if str(item).strip()]  # type: ignore[arg-type]
         if parts:
             return "\n\n".join(parts)
 
@@ -453,23 +470,97 @@ async def _send_telegram_message(token: str, chat_id: int, text: str) -> None:
     url = f"{TELEGRAM_API_BASE_URL}/bot{token}/sendMessage"
     headers = {"Content-Type": "application/json"}
 
-    def _post_message(message_text: str) -> None:
-        payload = json.dumps({"chat_id": chat_id, "text": message_text}).encode("utf-8")
-        req = urllib_request.Request(url, data=payload, headers=headers, method="POST")
-        with urllib_request.urlopen(req, timeout=10):  # type: ignore[arg-type]
-            return
-
     total_parts = len(parts)
     for index, part in enumerate(parts, start=1):
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": part}
         try:
-            await asyncio.to_thread(_post_message, part)
+            # Create request with timeout
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
+            )
+
+            # Send request with timeout
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status >= 400:
+                    raise urllib.error.HTTPError(
+                        url, response.status, response.reason, response.headers, None
+                    )
+
             if total_parts == 1:
-                logger.info(f"Sent Telegram reply to chat_id={chat_id}")
+                logger.info(f"Sent Telegram reply to chat_id={chat_id}")  # type: ignore[arg-type]
             else:
-                logger.info(f"Sent Telegram reply part {index}/{total_parts} to chat_id={chat_id}")
-        except urllib_error.URLError as exc:
+                logger.info(  # type: ignore[arg-type]
+                    f"Sent Telegram reply part {index}/{total_parts} to chat_id={chat_id}"
+                )
+        except (urllib.error.URLError, urllib.error.HTTPError) as exc:
             logger.error(f"Failed to send Telegram reply to chat_id={chat_id}: {exc}")
             break
 
-        if index < total_parts:
-            await asyncio.sleep(TELEGRAM_MESSAGE_SPLIT_DELAY)
+
+async def _download_file_from_telegram(token: str, file_id: str) -> bytes | None:
+    """Download a file from Telegram and return the content as bytes."""
+    try:
+        # 1. Get file path info
+        get_file_url = f"{TELEGRAM_API_BASE_URL}/bot{token}/getFile"
+        payload = json.dumps({"file_id": file_id}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+
+        req = urllib.request.Request(get_file_url, data=payload, headers=headers, method="POST")
+
+        def _get_file_info():
+            with urllib.request.urlopen(req, timeout=10) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        data = await asyncio.to_thread(_get_file_info)
+
+        if not data.get("ok"):
+            logger.error(f"Failed to get file info: {data}")
+            return None
+
+        file_path = data["result"]["file_path"]
+        download_url = f"{TELEGRAM_API_BASE_URL}/file/bot{token}/{file_path}"
+
+        # 2. Download file to memory
+        def _download():
+            with urllib.request.urlopen(download_url, timeout=30) as response:
+                return response.read()
+
+        return await asyncio.to_thread(_download)
+
+    except Exception as e:
+        logger.error(f"Error downloading file {file_id}: {e}")
+        return None
+
+
+async def _transcribe_audio_if_present(update: Update, token: str) -> str | None:
+    """Check for audio in update and transcribe if present."""
+    if not update.message:
+        return None
+
+    file_id = None
+
+    # Check for voice note
+    if "voice" in update.message:
+        file_id = update.message["voice"].get("file_id")
+        logger.info(f"Processing voice message: {file_id}")  # type: ignore[arg-type]
+
+    # Check for audio file
+    elif "audio" in update.message:
+        file_id = update.message["audio"].get("file_id")
+        logger.info(f"Processing audio message: {file_id}")  # type: ignore[arg-type]
+
+    if not file_id:
+        return None
+
+    audio_data = await _download_file_from_telegram(token, file_id)
+    if not audio_data:
+        return None
+
+    try:
+        transcription = await AudioTranscriber.get_instance().transcribe(audio_data)
+        if transcription:
+            logger.info(f"Transcription successful: {transcription[:50]}...")  # type: ignore[arg-type]
+        return transcription
+    except Exception as e:
+        logger.error(f"Error processing audio: {e}")
+        return None

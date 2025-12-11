@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..base import ChainOfThoughts
+from ....models import ChainOfThoughts
 
 type ProgramMode = Literal["hybrid", "learn", "answer"]
 
@@ -48,9 +48,7 @@ class RelevantHistoryItem(ChainOfThoughts):
         le=1.0,
     )
 
-    summary: str = Field(
-        description="Brief summary of the past interaction (Markdown preferred)."
-    )
+    summary: str = Field(description="Brief summary of the past interaction (Markdown preferred).")
 
     key_insights: list[str] = Field(
         description=(
@@ -76,20 +74,14 @@ class MathPythonEquations(ChainOfThoughts):
 
 
 class ConsensusModelRequirement(ChainOfThoughts):
-    name: str = Field(
-        description="Name of the model to involve in consensus for this sub-problem."
-    )
+    name: str = Field(description="Name of the model to involve in consensus for this sub-problem.")
     alias: str = Field(description="Short log/display name for this participant.")
     persona: str = Field(description="Behavior/style profile the model should adopt.")
-    perspective: str = Field(
-        description="Lens or position used when assessing this sub-problem."
-    )
+    perspective: str = Field(description="Lens or position used when assessing this sub-problem.")
 
 
 class SubProblemPlaybookEntry(ChainOfThoughts):
-    identifier: int = Field(
-        description="ID of the playbook entry to use for this sub-problem."
-    )
+    identifier: int = Field(description="ID of the playbook entry to use for this sub-problem.")
     success_criteria: str = Field(
         description="How to verify this playbook entry was applied correctly. What observable outcomes indicate success?"
     )

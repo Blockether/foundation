@@ -1,5 +1,7 @@
 """Tests covering Telegram-specific error classes."""
 
+import pytest
+
 from blockether_foundation.os.interfaces.telegram.errors import (
     BotNameConflictDetails,
     BotNameConflictError,
@@ -10,6 +12,7 @@ from blockether_foundation.os.interfaces.telegram.errors import (
 )
 
 
+@pytest.mark.unit
 def test_bot_validation_error_details() -> None:
     error = BotValidationError(
         bot_name="helper-bot",
@@ -24,6 +27,7 @@ def test_bot_validation_error_details() -> None:
     assert error.details.provided_config == {"name": "helper-bot"}
 
 
+@pytest.mark.unit
 def test_telegram_configuration_error_details() -> None:
     error = TelegramConfigurationError(
         message="Bad config",
@@ -39,6 +43,7 @@ def test_telegram_configuration_error_details() -> None:
     assert error.details.received_value == "oops"
 
 
+@pytest.mark.unit
 def test_bot_name_conflict_error_details() -> None:
     error = BotNameConflictError(conflicting_names=["dup"], all_bot_names=["dup", "dup"])
 

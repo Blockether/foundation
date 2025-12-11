@@ -4,15 +4,9 @@ Generic batch processor with retry logic and concurrent execution.
 
 import asyncio
 import logging
-import sys
+from builtins import BaseExceptionGroup
 from collections.abc import Callable, Coroutine, Sequence
-from typing import Any, Generic, TypeVar, cast
-
-# BaseExceptionGroup is available in Python 3.11+
-if sys.version_info >= (3, 11):
-    from builtins import BaseExceptionGroup
-else:
-    BaseExceptionGroup = None
+from typing import Any, TypeVar, cast
 
 from tenacity import (
     before_sleep_log,
@@ -29,7 +23,7 @@ TInput = TypeVar("TInput")
 TOutput = TypeVar("TOutput")
 
 
-class ConcurrentProcessor(Generic[TInput, TOutput]):
+class ConcurrentProcessor[TInput, TOutput]:
     """
     Generic concurrent processor with controlled parallelism and retry logic.
 
@@ -124,11 +118,11 @@ class ConcurrentProcessor(Generic[TInput, TOutput]):
                 except BaseException as excg:
                     exceptions: Sequence[BaseException]
                     if BaseExceptionGroup is not None and isinstance(excg, BaseExceptionGroup):
-                        exceptions = excg.exceptions
+                        exceptions = excg.exceptions  # type: ignore
                     else:
                         exceptions = [excg]
 
-                    for exc in exceptions:
+                    for exc in exceptions:  # type: ignore
                         if isinstance(exc, Exception):
                             if exc.__cause__ is not None:
                                 raise exc.__cause__ from None

@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from ..base import ChainOfThoughts
+from ....models import ChainOfThoughts
 
 
 class BaseSectionEntryAnalysis(ChainOfThoughts):

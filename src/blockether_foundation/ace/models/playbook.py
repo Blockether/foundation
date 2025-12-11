@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from .base import ChainOfThoughts
+from ...models import ChainOfThoughts
 
 # Metadata statistics for tracking entry quality and impact
 # helpful: Content that provides value, solves problems, or improves understanding

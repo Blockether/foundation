@@ -7,13 +7,14 @@ from agno.agent import Agent
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from blockether_foundation.result import Result
 from blockether_foundation.os.interfaces.telegram import telegram as telegram_module
 from blockether_foundation.os.interfaces.telegram.errors import BotValidationError
 from blockether_foundation.os.interfaces.telegram.models import BotConfig
 from blockether_foundation.os.interfaces.telegram.telegram import Telegram
+from blockether_foundation.result import Result
 
 
+@pytest.mark.unit
 def test_get_router_exposes_bot_routes() -> None:
     bot_config = BotConfig(name="blockether-bot", token="A" * 32)
     telegram_interface = Telegram(executor=cast(Agent, None), bot_configs=[bot_config])
@@ -31,6 +32,7 @@ def test_get_router_exposes_bot_routes() -> None:
     assert body["timestamp"]
 
 
+@pytest.mark.unit
 def test_configure_executor_variants(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeAgent:
         pass
@@ -58,6 +60,7 @@ def test_configure_executor_variants(monkeypatch: pytest.MonkeyPatch) -> None:
     assert interface.workflow is not None
 
 
+@pytest.mark.unit
 def test_lambda_extension_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     class DummyExtension:
         def __init__(self) -> None:
@@ -72,6 +75,7 @@ def test_lambda_extension_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(interface.background_task_scheduler, DummyExtension)
 
 
+@pytest.mark.unit
 def test_lambda_extension_not_created_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     def raise_extension_error():  # noqa: ANN001
         raise RuntimeError("Extension disabled")
@@ -85,6 +89,7 @@ def test_lambda_extension_not_created_when_disabled(monkeypatch: pytest.MonkeyPa
     assert interface.background_task_scheduler is None
 
 
+@pytest.mark.unit
 def test_telegram_initialization_raises_on_validation_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -10,3 +10,4 @@ htmlcov
 *.log
 examples/telegram/blockether_foundation.tar.gz
 coverage.json
+*.mp3

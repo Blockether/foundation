@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import TypeVar, override
 
 from .errors import FoundationBaseError
 
@@ -26,7 +26,7 @@ class ResultError(FoundationBaseError):
 
 
 @dataclass(frozen=True)
-class Result(Generic[T, E]):
+class Result[T, E: FoundationBaseError]:
     """A type that represents either success (Ok) or failure (Err).
 
     This is inspired by Rust's Result type and forces explicit error handling.
@@ -305,6 +305,7 @@ class Result(Generic[T, E]):
         assert self._error is not None
         return callback(self._error)
 
+    @override
     def __repr__(self) -> str:
         """String representation for debugging."""
         if self._is_ok:

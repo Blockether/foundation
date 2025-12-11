@@ -1,5 +1,8 @@
 """Unit tests for Telegram validation helpers."""
 
+import pytest
+
+from blockether_foundation.result import Result
 from blockether_foundation.os.interfaces.telegram.errors import (
     BotNameConflictError,
     BotValidationError,
@@ -19,6 +22,7 @@ def _make_bot_config(name: str) -> BotConfig:
     return BotConfig(name=name, token="A" * 16)
 
 
+@pytest.mark.unit
 def test_validate_and_normalize_accepts_valid_list() -> None:
     config = _make_bot_config("valid-bot")
 
@@ -29,6 +33,7 @@ def test_validate_and_normalize_accepts_valid_list() -> None:
     assert validated == [config]
 
 
+@pytest.mark.unit
 def test_validate_and_normalize_rejects_duplicate_names() -> None:
     config_one = _make_bot_config("duplicate-bot")
     config_two = _make_bot_config("duplicate-bot")
@@ -41,21 +46,25 @@ def test_validate_and_normalize_rejects_duplicate_names() -> None:
     assert error.conflicting_names == ["duplicate-bot"]
 
 
+@pytest.mark.unit
 def test_validate_bot_name_rejects_invalid_characters() -> None:
     result = validate_bot_name("invalid@name")
     assert result.is_err()
 
 
+@pytest.mark.unit
 def test_validate_bot_name_rejects_empty_string() -> None:
     result = validate_bot_name("   ")
     assert result.is_err()
 
 
+@pytest.mark.unit
 def test_validate_bot_name_rejects_overly_long_name() -> None:
     result = validate_bot_name("a" * 65)
     assert result.is_err()
 
 
+@pytest.mark.unit
 def test_validate_single_bot_config_errors_on_bad_values() -> None:
     config = BotConfig(
         name="bad name!",
@@ -71,6 +80,7 @@ def test_validate_single_bot_config_errors_on_bad_values() -> None:
     assert any("cannot" in msg for msg in error.details.validation_errors)
 
 
+@pytest.mark.unit
 def test_validate_single_bot_config_requires_token() -> None:
     config = BotConfig(name="valid-name", token="   ")
     result = validate_single_bot_config(config)
@@ -81,6 +91,7 @@ def test_validate_single_bot_config_requires_token() -> None:
     assert "Bot token cannot be empty" in error.details.validation_errors
 
 
+@pytest.mark.unit
 def test_validate_single_bot_config_numeric_upper_bounds() -> None:
     config = BotConfig(
         name="valid-name",
@@ -100,11 +111,13 @@ def test_validate_single_bot_config_numeric_upper_bounds() -> None:
     )
 
 
+@pytest.mark.unit
 def test_validate_bot_config_list_rejects_empty_list() -> None:
     result = validate_bot_config_list([])
     assert result.is_err()
 
 
+@pytest.mark.unit
 def test_validate_bot_config_list_returns_first_error() -> None:
     valid = _make_bot_config("valid")
     invalid = BotConfig(name="", token="A" * 32)
@@ -115,7 +128,43 @@ def test_validate_bot_config_list_returns_first_error() -> None:
     assert isinstance(result.unwrap_err(), BotValidationError)
 
 
+@pytest.mark.unit
 def test_validate_and_normalize_bot_configs_requires_non_empty_list() -> None:
     result = validate_and_normalize_bot_configs([])
     assert result.is_err()
     assert isinstance(result.unwrap_err(), TelegramConfigurationError)
+
+
+@pytest.mark.unit
+def test_validate_single_bot_config_with_name_error_without_details() -> None:
+    """Test name validation error without details attribute (covers line 74)."""
+    from blockether_foundation.os.interfaces.telegram.errors import BotValidationError
+    from blockether_foundation.os.interfaces.telegram.validation import validate_single_bot_config
+    from unittest.mock import patch
+
+    # Create a config with invalid name
+    config = BotConfig(
+        name="invalid name with spaces",  # This will trigger name validation error
+        token="A" * 46,
+        secret="secret",
+        executor="executor",
+        webhook_base_url="https://example.com"
+    )
+
+    # Mock validate_bot_name to return an error without details.validation_errors
+    with patch('blockether_foundation.os.interfaces.telegram.validation.validate_bot_name') as mock_validate:
+        # Create a mock error without details attribute
+        error_without_details = BotValidationError(
+            bot_name="invalid name",
+            validation_errors=["Invalid format"],
+            provided_config={"name": "invalid name"}
+        )
+        # Remove the details attribute to trigger the else branch
+        delattr(error_without_details, 'details')
+        mock_validate.return_value = Result.Err(error_without_details)
+
+        # This should trigger the else branch on line 74
+        result = validate_single_bot_config(config)
+        assert result.is_err()
+        validation_error = result.unwrap_err()
+        assert "Invalid bot name" in validation_error.message
