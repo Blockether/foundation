@@ -25,7 +25,7 @@ class TestGraphIndex:
             Entity(
                 id="entity1",
                 name="Test Entity One",
-                type="person",
+                type="creature",  # Changed from "person" to "creature"
                 content="This is a test entity with some content words",
                 created_at=yesterday,
                 updated_at=now,
@@ -54,7 +54,7 @@ class TestGraphIndex:
         return [
             Relationship(
                 id="rel1",
-                type="belongs_to",
+                type="related_to",  # Changed from "belongs_to" to "related_to"
                 source="entity1",
                 target="entity2",
                 created_at=datetime.now(UTC),
@@ -271,8 +271,8 @@ class TestGraphIndex:
 
         assert len(entity_by_id) == SAMPLE_ENTITY_COUNT
         assert len(relationship_by_id) == 2
-        assert "person" in entities_by_type
-        assert "belongs_to" in relationships_by_type
+        assert "creature" in entities_by_type  # Changed from "person" to "creature"
+        assert "related_to" in relationships_by_type  # Changed from "belongs_to" to "related_to"
 
     @pytest.mark.unit
     def test_from_dict_deserialization(
@@ -359,7 +359,7 @@ class TestGraphIndex:
             Entity(
                 id="e2",
                 name="Entity 2",
-                type="person",
+                type="creature",  # Changed from "person" to "creature"
                 content="Content 2",
                 created_at=last_week,
                 updated_at=last_week,

@@ -1,6 +1,7 @@
 """Tests for Foundation error classes."""
 
 import pytest
+from pydantic import BaseModel
 
 from blockether_foundation.errors import ConsensusFieldInitError, FoundationBaseError
 
@@ -19,7 +20,6 @@ def test_error_having_auto_solidity_like_message() -> None:
 @pytest.mark.unit
 def test_error_with_details() -> None:
     """Test error string representation with details (covers lines 33-34)."""
-    from pydantic import BaseModel
 
     class ErrorDetails(BaseModel):
         code: int

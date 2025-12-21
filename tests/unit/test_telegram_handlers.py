@@ -1,10 +1,16 @@
 """Tests for Telegram webhook handler utilities."""
 
 import asyncio
+import json
+from collections.abc import Awaitable, Callable
+from types import TracebackType
 from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
 from agno.agent import Agent
+from agno.team import Team
+from agno.workflow import Workflow
 from fastapi import APIRouter, BackgroundTasks, FastAPI
 from fastapi.testclient import TestClient
 
@@ -29,6 +35,15 @@ TEST_DENYLIST_USER_ID_2 = "7"
 TEST_OTHER_USER_ID_2 = 6
 TEST_OTHER_USER_ID_3 = 9
 TEST_ALICE_ID = 10
+# HTTP Status Constants
+HTTP_OK = 200
+HTTP_UNAUTHORIZED = 401
+HTTP_PAYLOAD_TOO_LARGE = 413
+HTTP_BAD_REQUEST = 400
+HTTP_INTERNAL_SERVER_ERROR = 500
+# Split test constants
+EXPECTED_SPLIT_PARTS = 3
+MAX_MESSAGE_LENGTH = 3000
 
 
 def _make_update() -> Update:
@@ -57,7 +72,9 @@ def _capture_error_logs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 async def test_run_process_update_sync_on_running_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     event = asyncio.Event()
 
-    async def fake_process_update_async(update: Update, executor, bot_config: BotConfig) -> None:
+    async def fake_process_update_async(
+        update: Update, executor: Agent | Team | Workflow | None, bot_config: BotConfig
+    ) -> None:
         assert update.update_id == TEST_UPDATE_ID
         assert bot_config.name == "test-bot"
         event.set()
@@ -65,7 +82,7 @@ async def test_run_process_update_sync_on_running_loop(monkeypatch: pytest.Monke
     monkeypatch.setattr(handlers, "process_update_async", fake_process_update_async)
 
     # Call from within an active event loop; should schedule task without calling asyncio.run
-    handlers._run_process_update_sync(_make_update(), executor=None, bot_config=_make_bot_config())
+    handlers._run_process_update_sync(_make_update(), executor=None, bot_config=_make_bot_config())  # type: ignore[attr-defined]
 
     await asyncio.wait_for(event.wait(), timeout=TEST_TIMEOUT)
 
@@ -74,13 +91,15 @@ async def test_run_process_update_sync_on_running_loop(monkeypatch: pytest.Monke
 def test_run_process_update_sync_without_running_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     called = False
 
-    async def fake_process_update_async(update: Update, executor, bot_config: BotConfig) -> None:
+    async def fake_process_update_async(
+        update: Update, executor: Agent | Team | Workflow | None, bot_config: BotConfig
+    ) -> None:
         nonlocal called
         called = True
 
     monkeypatch.setattr(handlers, "process_update_async", fake_process_update_async)
 
-    handlers._run_process_update_sync(_make_update(), executor=None, bot_config=_make_bot_config())
+    handlers._run_process_update_sync(_make_update(), executor=None, bot_config=_make_bot_config())  # type: ignore[attr-defined]
 
     assert called
 
@@ -153,19 +172,26 @@ def test_format_message_variants() -> None:
     )
     assert "button" in handlers.format_message_for_executor(callback)
 
-    fallback = Update(update_id=4)
-    assert "unsupported" in handlers.format_message_for_executor(fallback)
+    unsupported_update = Update(update_id=4)
+    assert "unsupported" in handlers.format_message_for_executor(unsupported_update)
 
 
 class DummyExecutor:
     def __init__(self) -> None:
         self.calls: list[str] = []
-        self.should_raise: Exception | None = None
 
     def run(self, message: str) -> None:
-        if self.should_raise:
-            raise self.should_raise
         self.calls.append(message)
+
+
+class ErrorRaisingExecutor:
+    def __init__(self, error: Exception) -> None:
+        self.calls: list[str] = []
+        self.error = error
+
+    def run(self, message: str) -> None:
+        self.calls.append(message)
+        raise self.error
 
 
 @pytest.mark.unit
@@ -210,9 +236,11 @@ async def test_process_update_async_timeout(
     async def fake_to_thread(func: Any, *args: Any, **kwargs: Any) -> None:
         func(*args, **kwargs)
 
-    async def fake_wait_for(coro, timeout):  # type: ignore[override]
+    timeout_error = TimeoutError("boom")
+
+    async def fake_wait_for(coro: Awaitable[Any], timeout: float) -> Any:
         await coro
-        raise TimeoutError("boom")
+        raise timeout_error
 
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
     monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
@@ -229,13 +257,12 @@ async def test_process_update_async_executor_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     messages = _capture_error_logs(monkeypatch)
-    executor = DummyExecutor()
-    executor.should_raise = ValueError("boom")
+    executor = ErrorRaisingExecutor(ValueError("boom"))
 
     async def fake_to_thread(func: Any, *args: Any, **kwargs: Any) -> None:
         func(*args, **kwargs)
 
-    async def fake_wait_for(coro, timeout):  # type: ignore[override]
+    async def fake_wait_for(coro: Awaitable[Any], timeout: float) -> Any:
         await coro
 
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
@@ -271,9 +298,10 @@ async def test_process_update_async_missing_user_id(monkeypatch: pytest.MonkeyPa
 @pytest.mark.asyncio
 async def test_process_update_async_processing_error(monkeypatch: pytest.MonkeyPatch) -> None:
     messages = _capture_error_logs(monkeypatch)
+    processing_error = RuntimeError("explode")
 
-    def raise_processing_error(*args, **kwargs):  # noqa: ANN001
-        raise RuntimeError("explode")
+    def raise_processing_error(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN001
+        raise processing_error
 
     monkeypatch.setattr(handlers, "is_user_allowed", raise_processing_error)
 
@@ -285,10 +313,10 @@ async def test_process_update_async_processing_error(monkeypatch: pytest.MonkeyP
 
 class DummyScheduler:
     def __init__(self) -> None:
-        self.tasks: list[tuple[Any, tuple[Any, ...], dict[str, Any]]] = []
+        self.tasks: list[tuple[Callable[..., Any], tuple[Any, ...], dict[str, Any]]] = []
         self.done_calls = 0
 
-    def add_task(self, func, *args, **kwargs):
+    def add_task(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         self.tasks.append((func, args, kwargs))
 
     def done(self) -> None:
@@ -303,7 +331,7 @@ class DummyScheduler:
 def test_schedule_update_processing_with_scheduler() -> None:
     scheduler = DummyScheduler()
     update = _make_update()
-    handlers._schedule_update_processing(
+    handlers._schedule_update_processing(  # type: ignore[attr-defined]
         update=update,
         executor=None,
         bot_config=_make_bot_config(),
@@ -312,13 +340,13 @@ def test_schedule_update_processing_with_scheduler() -> None:
     )
     assert scheduler.tasks
     func, args, kwargs = scheduler.tasks[0]
-    assert func is handlers._run_process_update_sync
+    assert func is handlers._run_process_update_sync  # type: ignore[attr-defined]
 
 
 @pytest.mark.unit
 def test_schedule_update_processing_without_scheduler() -> None:
     background_tasks = BackgroundTasks()
-    handlers._schedule_update_processing(
+    handlers._schedule_update_processing(  # type: ignore[attr-defined]
         update=_make_update(),
         executor=None,
         bot_config=_make_bot_config(),
@@ -332,14 +360,14 @@ def test_schedule_update_processing_without_scheduler() -> None:
 def test_notify_scheduler_done_with_background_tasks() -> None:
     scheduler = DummyScheduler()
     background_tasks = BackgroundTasks()
-    handlers._notify_scheduler_done(scheduler, background_tasks)
+    handlers._notify_scheduler_done(scheduler, background_tasks)  # type: ignore[attr-defined]
     assert len(background_tasks.tasks) == 1
 
 
 @pytest.mark.unit
 def test_notify_scheduler_done_direct_call() -> None:
     scheduler = DummyScheduler()
-    handlers._notify_scheduler_done(scheduler, None)
+    handlers._notify_scheduler_done(scheduler, None)  # type: ignore[attr-defined]
     assert scheduler.done_calls == 1
 
 
@@ -348,10 +376,10 @@ def test_split_message_for_telegram_handles_long_text() -> None:
     long_paragraph = "A" * 2500
     text = f"{long_paragraph}\n\n{long_paragraph}\n\n{long_paragraph}"
 
-    parts = handlers._split_message_for_telegram(text, max_length=3000)
+    parts = handlers._split_message_for_telegram(text, max_length=MAX_MESSAGE_LENGTH)  # type: ignore[attr-defined]
 
-    assert len(parts) == 3
-    assert all(len(part) <= 3000 for part in parts)
+    assert len(parts) == EXPECTED_SPLIT_PARTS
+    assert all(len(part) <= MAX_MESSAGE_LENGTH for part in parts)
     recombined = "".join(part.replace("\n\n", "") for part in parts)
     assert recombined == text.replace("\n\n", "")
 
@@ -365,29 +393,35 @@ async def test_send_telegram_message_splits_and_sends_multiple_parts(
 
     class FakeResponse:
         def __init__(self):
-            self.status = 200
+            self.status = HTTP_OK
             self.reason = "OK"
             self.headers = {}
 
         def __enter__(self):
             return self
 
-        def __exit__(self, exc_type, exc, tb):
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> bool:
             return False
 
-    def fake_urlopen(request, timeout=None):
+    def fake_urlopen(request: Mock, timeout: float | None = None) -> Mock:
         # Extract the payload from the request data
-        import json
-        data = json.loads(request.data.decode('utf-8'))
+        data = json.loads(request.data.decode("utf-8"))
         sent_payloads.append(data["text"])
-        return FakeResponse()
+        return FakeResponse()  # type: ignore[return-value]
 
     monkeypatch.setattr(
-        handlers, "_split_message_for_telegram", lambda text, max_length=4000: ["part1", "part2"]
+        handlers,
+        "_split_message_for_telegram",
+        lambda text: ["part1", "part2"],  # type: ignore[attr-defined]
     )
     monkeypatch.setattr(handlers.urllib.request, "urlopen", fake_urlopen)
 
-    await handlers._send_telegram_message("token", 123, "ignored")
+    await handlers._send_telegram_message("token", 123, "ignored")  # type: ignore[attr-defined]
 
     assert sent_payloads == ["part1", "part2"]
 
@@ -397,24 +431,30 @@ def _build_test_app(
 ) -> TestClient:
     router = APIRouter(prefix=f"/telegram/{bot_config.name}")
 
-    if monkeypatch is not None:
-        monkeypatch.setattr(handlers, "_schedule_update_processing", lambda **kwargs: None)
-
     app = FastAPI()
     app.include_router(handlers.attach_routes(router, executor=None, bot_config=bot_config))
     return TestClient(app)
 
 
-@pytest.mark.unit
-def test_webhook_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    bot_config = BotConfig(name="bot", token="T", webhook_secret="secret")
-    called = {}
+def _build_test_app_with_mock_processing(
+    bot_config: BotConfig, monkeypatch: pytest.MonkeyPatch
+) -> tuple[TestClient, dict[str, Any]]:
+    """Helper to build test app with mocked processing for tracking calls."""
+    called: dict[str, Any] = {}
 
-    def fake_schedule(**kwargs):
+    def fake_schedule(**kwargs: Any) -> None:
         called["update_id"] = kwargs["update"].update_id
 
     monkeypatch.setattr(handlers, "_schedule_update_processing", fake_schedule)
     client = _build_test_app(bot_config)
+
+    return client, called
+
+
+@pytest.mark.unit
+def test_webhook_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot_config = BotConfig(name="bot", token="T", webhook_secret="secret")
+    client, called = _build_test_app_with_mock_processing(bot_config, monkeypatch)
 
     response = client.post(
         f"/telegram/{bot_config.name}/webhook",
@@ -422,7 +462,7 @@ def test_webhook_success(monkeypatch: pytest.MonkeyPatch) -> None:
         headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == HTTP_OK
     assert called["update_id"] == 10
 
 
@@ -434,7 +474,7 @@ def test_webhook_rejects_bad_secret(monkeypatch: pytest.MonkeyPatch) -> None:
         json={"update_id": 1, "message": {"from": {"id": 1}}},
         headers={"X-Telegram-Bot-Api-Secret-Token": "wrong"},
     )
-    assert response.status_code == 401
+    assert response.status_code == HTTP_UNAUTHORIZED
 
 
 @pytest.mark.unit
@@ -445,7 +485,7 @@ def test_webhook_rejects_large_request(monkeypatch: pytest.MonkeyPatch) -> None:
         json={"update_id": 1, "message": {"from": {"id": 1}}},
         headers={"Content-Length": str(handlers.MAX_WEBHOOK_SIZE + 1)},
     )
-    assert response.status_code == 413
+    assert response.status_code == HTTP_PAYLOAD_TOO_LARGE
 
 
 @pytest.mark.unit
@@ -456,13 +496,15 @@ def test_webhook_invalid_update(monkeypatch: pytest.MonkeyPatch) -> None:
         content=b"not-json",
         headers={"Content-Type": "application/json"},
     )
-    assert response.status_code == 400
+    assert response.status_code == HTTP_BAD_REQUEST
 
 
 @pytest.mark.unit
 def test_webhook_handles_internal_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(**kwargs):
-        raise RuntimeError("boom")
+    runtime_error = RuntimeError("boom")
+
+    def boom(**kwargs: Any) -> None:  # noqa: ANN003
+        raise runtime_error
 
     monkeypatch.setattr(handlers, "_schedule_update_processing", boom)
     client = _build_test_app(BotConfig(name="bot", token="T"))
@@ -470,22 +512,23 @@ def test_webhook_handles_internal_error(monkeypatch: pytest.MonkeyPatch) -> None
         "/telegram/bot/webhook",
         json={"update_id": 1, "message": {"from": {"id": 1}}},
     )
-    assert response.status_code == 500
+    assert response.status_code == HTTP_INTERNAL_SERVER_ERROR
 
 
 @pytest.mark.unit
 def test_health_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _build_test_app(BotConfig(name="bot", token="T"), monkeypatch)
     response = client.get("/telegram/bot/health")
-    assert response.status_code == 200
+    assert response.status_code == HTTP_OK
     assert response.json()["status"] == "healthy"
 
 
 @pytest.mark.unit
 def test_extract_chat_id_from_callback_query() -> None:
     """Test extracting chat_id from callback query updates."""
-    update = Update(update_id=1, callback_query={"message": {"chat": {"id": 456}}})
-    assert handlers.extract_chat_id(update) == 456
+    TEST_CHAT_ID = 456
+    update = Update(update_id=1, callback_query={"message": {"chat": {"id": TEST_CHAT_ID}}})
+    assert handlers.extract_chat_id(update) == TEST_CHAT_ID
 
 
 @pytest.mark.unit
@@ -506,14 +549,14 @@ def test_extract_chat_id_from_callback_query_without_chat() -> None:
 def test_extract_executor_reply_text_empty_string() -> None:
     """Test _extract_executor_reply_text with empty string response."""
     response = ""
-    assert handlers._extract_executor_reply_text(response) is None
+    assert handlers._extract_executor_reply_text(response) is None  # type: ignore[attr-defined]
 
 
 @pytest.mark.unit
 def test_extract_executor_reply_text_whitespace_only() -> None:
     """Test _extract_executor_reply_text with whitespace-only string."""
     response = "   \n\t  "
-    assert handlers._extract_executor_reply_text(response) is None
+    assert handlers._extract_executor_reply_text(response) is None  # type: ignore[attr-defined]
 
 
 @pytest.mark.unit
@@ -524,7 +567,7 @@ def test_extract_executor_reply_text_with_content_list() -> None:
         content = ["item1", "item2", "item3"]
 
     response = MockResponse()
-    result = handlers._extract_executor_reply_text(response)
+    result = handlers._extract_executor_reply_text(response)  # type: ignore[attr-defined]
     assert result == "item1\n\nitem2\n\nitem3"
 
 
@@ -537,7 +580,7 @@ def test_extract_executor_reply_text_with_text_attribute() -> None:
         text = "Some text content"
 
     response = MockResponse()
-    result = handlers._extract_executor_reply_text(response)
+    result = handlers._extract_executor_reply_text(response)  # type: ignore[attr-defined]
     assert result == "Some text content"
 
 
@@ -545,57 +588,55 @@ def test_extract_executor_reply_text_with_text_attribute() -> None:
 def test_force_split_text_no_breakpoints() -> None:
     """Test _force_split_text with text that has no natural breakpoints."""
     long_word = "a" * 50
-    result = handlers._force_split_text(long_word, 20)
-    assert len(result) == 3
-    assert sum(len(part) for part in result) == 50
-    assert all(len(part) <= 20 for part in result)
+    expected_parts = 3
+    expected_total_length = 50
+    max_split_length = 20
+    result = handlers._force_split_text(long_word, max_split_length)  # type: ignore[attr-defined]
+    assert len(result) == expected_parts
+    assert sum(len(part) for part in result) == expected_total_length
+    assert all(len(part) <= max_split_length for part in result)
 
 
 @pytest.mark.unit
 def test_split_message_normalization_whitespace() -> None:
     """Test _split_message_for_telegram normalizes whitespace."""
     text = "  Line1\n\n\nLine2\n\nLine3  "
-    result = handlers._split_message_for_telegram(text, 1000)
+    result = handlers._split_message_for_telegram(text, 1000)  # type: ignore[attr-defined]
     assert len(result) == 1
     # The function strips outer whitespace and splits by double newlines, preserving empty paragraphs
     assert result[0] == "Line1\n\n\nLine2\n\nLine3"
 
 
 @pytest.mark.unit
-def test_send_telegram_message_empty_parts() -> None:
+@pytest.mark.asyncio
+async def test_send_telegram_message_empty_parts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test _send_telegram_message with empty parts after splitting."""
 
-    def mock_split_empty(text, max_length=None):
+    def mock_split_empty(text: str, max_length: int | None = None) -> list[str]:
         return []
 
-    import asyncio
+    monkeypatch.setattr(handlers, "_split_message_for_telegram", mock_split_empty)
 
-    with pytest.MonkeyPatch().context() as m:
-        m.setattr(handlers, "_split_message_for_telegram", mock_split_empty)
+    # This should not raise any errors even when split returns empty list
+    await handlers._send_telegram_message("test_token", 123, "test")  # type: ignore[attr-defined]
 
-        async def test_send():
-            await handlers._send_telegram_message("test_token", 123, "test")
-
-        asyncio.run(test_send())  # Should not raise any errors
+    # Test passes if no exception is raised
+    assert True
 
 
 @pytest.mark.unit
 def test_extract_executor_reply_text_from_none() -> None:
     """Test _extract_executor_reply_text with None response."""
-    assert handlers._extract_executor_reply_text(None) is None
+    assert handlers._extract_executor_reply_text(None) is None  # type: ignore[attr-defined]
 
 
 @pytest.mark.unit
 def test_bot_config_webhook_url_property() -> None:
     """Test BotConfig webhook_url property (covers line 22 in models.py)."""
-    from blockether_foundation.os.interfaces.telegram.models import BotConfig
-
     config = BotConfig(
         name="my_test_bot",
         token="A" * 46,
-        secret="test_secret",
-        executor="test_executor",
-        webhook_base_url="https://example.com"
+        webhook_secret="test_secret",
     )
 
     # Test webhook_url property

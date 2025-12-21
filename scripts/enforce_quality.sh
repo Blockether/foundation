@@ -13,8 +13,8 @@
 #   ./enforce_quality.sh [OPTIONS] [FILE_OR_DIRECTORY]
 #
 # ARGUMENTS:
-#   FILE_OR_DIRECTORY    Path to specific test file or directory containing tests
-#                        (Optional: defaults to analyzing all files in tests/)
+#   FILE_OR_DIRECTORY    Path to specific file or directory
+#                        (Optional: defaults to analyzing all files in src/ and tests/)
 #
 # OPTIONS:
 #   -h, --help          Show help message from header documentation and exit
@@ -23,13 +23,13 @@
 #
 # EXAMPLES:
 #   ./enforce_quality.sh
-#       # Analyze all test files in tests/ directory
+#       # Analyze all files in src/ and tests/ directories
 #
 #   ./enforce_quality.sh tests/unit/test_example.py
-#       # Analyze specific test file
+#       # Analyze specific file
 #
-#   ./enforce_quality.sh tests/unit/
-#       # Analyze all test files in specific directory
+#   ./enforce_quality.sh src/
+#       # Analyze all files in specific directory
 #
 # DEPENDENCIES:
 #   - python3 (required)
@@ -155,22 +155,26 @@ print_result() {
     fi
 }
 
-# Find test files to analyze
-find_test_files() {
-    local search_path="${1:-tests/}"
-
+# Find Python files to analyze
+find_python_files() {
     if [[ $# -gt 0 ]]; then
-        # Use specific file if provided
-        if [[ -f "$1" ]]; then
-            echo "$1"
-            return
+        # Process provided arguments
+        for arg in "$@"; do
+            if [[ -f "$arg" ]]; then
+                echo "$arg"
+            elif [[ -d "$arg" ]]; then
+                find "$arg" -name "*.py" 2>/dev/null | sort
+            fi
+        done
+    else
+        # Default: search src/ and tests/
+        if [[ -d "src" ]]; then
+            find "src" -name "*.py" 2>/dev/null | sort
         fi
-        # Use path as search directory
-        search_path="$1"
+        if [[ -d "tests" ]]; then
+            find "tests" -name "*.py" 2>/dev/null | sort
+        fi
     fi
-
-    # Find Python test files
-    find "$search_path" -name "test_*.py" -o -name "*_test.py" 2>/dev/null | sort
 }
 
 main() {
@@ -208,9 +212,9 @@ main() {
         esac
     done
 
-    # Find test files based on remaining arguments
+    # Find files based on remaining arguments
     local remaining_args=("$@")
-    test_files=($(find_test_files "${remaining_args[@]}"))
+    test_files=($(find_python_files "${remaining_args[@]}"))
     local total_files=${#test_files[@]}
     local files_with_issues=0
 
@@ -266,7 +270,11 @@ main() {
 
         local quality_args=("$file" --no-test-execution)
         [[ $fix_mode == true ]] && quality_args+=(--fix --max-iterations "$max_iterations")
-        python3 "$QUALITY_SCRIPT" "${quality_args[@]}" 2>/dev/null
+        # Change to the project root directory first
+        local original_dir=$(pwd)
+        cd "$(dirname "$SCRIPT_DIR")"  # Go up from scripts/ to project root
+        python3 -m scripts.impl.quality_enforcer "${quality_args[@]}"
+        cd "$original_dir" > /dev/null
         local quality_exit_code=$?
 
         # Re-enable exit on error

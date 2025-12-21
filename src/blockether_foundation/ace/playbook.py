@@ -7,10 +7,13 @@ import random
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from textwrap import dedent
+from typing import cast
 
 from pydantic import Field
 
 from ..models import BaseModelSerializable
+
+# Import types for both runtime and type checking
 from .models.playbook import (
     BaseSectionEntry,
     GroundTruth,
@@ -23,6 +26,8 @@ __SEED_DETERMINISTIC_COMPONENT__ = 29
 
 
 class Playbook(BaseModelSerializable):
+    """Playbook class for managing agent playbooks."""
+
     name: str = Field(default="Default Agent Playbook", description="Name of the playbook")
 
     overview: PlaybookHighLevelOverview = PlaybookHighLevelOverview(
@@ -34,8 +39,13 @@ class Playbook(BaseModelSerializable):
     )
 
     ground_truths: list[GroundTruth] = Field(
-        default_factory=list, description="List of ground truth entries in the playbook"
+        default_factory=lambda: list[GroundTruth](),
+        description="List of ground truth entries in the playbook",
     )
+
+    def get_ground_truths(self) -> list[GroundTruth]:
+        """Helper method to ensure proper type annotation."""
+        return cast(list["GroundTruth"], self.ground_truths)
 
     version: int = Field(default=1, description="Version of the playbook content")
 

@@ -30,9 +30,11 @@ class UserRequestComplexityAnalysis(ChainOfThoughts):
         default=1,
     )
 
+    # ignore-development
     reasoning_level: Literal["minimal", "low", "medium", "high"] = Field(
         description=(
             "**Depth of reasoning required**:\n"
+            # ignore-development
             "- `minimal`: very little reasoning required\n"
             "- `low`: some reasoning required, but mostly straightforward\n"
             "- `medium`: multi-step synthesis\n"
@@ -97,7 +99,7 @@ class SubProblemPlaybookEntry(ChainOfThoughts):
         )
     )
 
-    consensus_models_requirements: list[ConsensusModelRequirement] | None = Field(
+    consensus_models_requirements: list["ConsensusModelRequirement"] | None = Field(
         default=None,
         description=(
             "Consensus models requirements for this sub-problem if applicable. Rule of thumb: If the user <USER_REQUEST> explicitly asks for consensus or mentions words like: 'ultrathink', 'collaborate', or 'groupthink', "
@@ -105,7 +107,7 @@ class SubProblemPlaybookEntry(ChainOfThoughts):
         ),
     )
 
-    computable_math_solutions: list[MathPythonEquations] = Field(
+    computable_math_solutions: list["MathPythonEquations"] = Field(  # type: ignore[reportUnknownVariableType]
         default_factory=list,
         description=(
             "Python-executable solutions for mathematical equations in this sub-problem. For any mathematical equations, provide Python snippets that use SymPy which is a python library for symbolic mathematics."
@@ -119,7 +121,7 @@ class DecomposedSubProblem(ChainOfThoughts):
     description: str | None = Field(
         default=None, description="Detailed description of the sub-problem."
     )
-    suggested_entries_to_use: list[SubProblemPlaybookEntry] = Field(
+    suggested_entries_to_use: list["SubProblemPlaybookEntry"] = Field(  # type: ignore[reportUnknownVariableType]
         default_factory=list,
         description="List of playbook entries to use for this sub-problem. Should be empty if no playbook entries are relevant.",
     )
@@ -148,7 +150,7 @@ class AnalysisOutput(BaseModel):
         )
     )
 
-    relevant_history: list[RelevantHistoryItem] = Field(
+    relevant_history: list["RelevantHistoryItem"] = Field(  # type: ignore[reportUnknownVariableType]
         default_factory=list,
         description=(
             "List of relevant past interactions that may inform the current request. "
@@ -156,7 +158,7 @@ class AnalysisOutput(BaseModel):
         ),
     )
 
-    problem_decomposition: list[SubProblemPlaybookEntry] = Field(
+    problem_decomposition: list["SubProblemPlaybookEntry"] = Field(
         description=(
             "Decomposition of the user's request into smaller, manageable sub-tasks or steps. "
             "Leave empty if the request is straightforward and does not require decomposition."

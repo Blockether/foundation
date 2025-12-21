@@ -42,5 +42,5 @@ class ReflectorOutput(BaseModel):
     )
 
     ground_truths: list[GroundTruthTag] = Field(
-        default_factory=list, description="Feedback on used ground truths."
+        default_factory=lambda: [], description="Feedback on used ground truths."
     )

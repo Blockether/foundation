@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from agno.agent import Agent
 from agno.team import Team
@@ -31,6 +31,7 @@ TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 TELEGRAM_MAX_MESSAGE_LENGTH = 4000
 
 
+@runtime_checkable
 class BackgroundTaskScheduler(Protocol):
     """Protocol describing objects capable of scheduling synchronous tasks."""
 
@@ -386,19 +387,32 @@ def _extract_executor_reply_text(response: Any) -> str | None:
         text = response.strip()
         return text or None
 
-    content = getattr(response, "content", None)
-    if isinstance(content, str):
-        text = content.strip()
-        if text:
-            return text
-    elif isinstance(content, list):
-        parts: list[str] = [str(item).strip() for item in content if str(item).strip()]  # type: ignore[arg-type]
-        if parts:
-            return "\n\n".join(parts)
+    # Define protocols for objects with content or text attributes
+    @runtime_checkable
+    class HasContent(Protocol):
+        content: Any
 
-    text_attr = getattr(response, "text", None)
-    if isinstance(text_attr, str) and text_attr.strip():
-        return text_attr.strip()
+    @runtime_checkable
+    class HasText(Protocol):
+        text: Any
+
+    # Check for content attribute using isinstance
+    if isinstance(response, HasContent):
+        content = response.content
+        if isinstance(content, str):
+            text = content.strip()
+            if text:
+                return text
+        elif isinstance(content, list):
+            parts: list[str] = [str(item).strip() for item in content if str(item).strip()]  # type: ignore[arg-type]
+            if parts:
+                return "\n\n".join(parts)
+
+    # Check for text attribute using isinstance
+    if isinstance(response, HasText):
+        text_attr = response.text
+        if isinstance(text_attr, str) and text_attr.strip():
+            return text_attr.strip()
 
     text = str(response).strip()
     return text or None
@@ -559,8 +573,9 @@ async def _transcribe_audio_if_present(update: Update, token: str) -> str | None
     try:
         transcription = await AudioTranscriber.get_instance().transcribe(audio_data)
         if transcription:
-            logger.info(f"Transcription successful: {transcription[:50]}...")  # type: ignore[arg-type]
-        return transcription
+            logger.info(f"Transcription successful: {transcription.text[:50]}...")  # type: ignore[arg-type]
+            return transcription.text
+        return None
     except Exception as e:
         logger.error(f"Error processing audio: {e}")
         return None

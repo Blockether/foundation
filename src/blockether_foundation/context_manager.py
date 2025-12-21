@@ -10,7 +10,8 @@ import re
 
 import litellm
 from agno.agent import Agent
-from agno.session import AgentSession
+from agno.models.message import Message
+from agno.session import AgentSession, TeamSession, WorkflowSession
 from pydantic import BaseModel, Field
 
 from .errors import FoundationBaseError
@@ -59,6 +60,20 @@ class TextChunk(BaseModel):
     boundary_type: str = Field(
         description='Type of boundary used for this chunk: "paragraph", "sentence", "word", or "token"'
     )
+    # Enhanced marking fields
+    split_reason: str = Field(description='Reason for split: "natural", "token_limit", "forced"')
+    split_boundary: str = Field(
+        description='Boundary used for split: "paragraph", "sentence", "word", "character"'
+    )
+    has_overlap_with_previous: bool = Field(
+        default=False, description="Whether this chunk overlaps with previous chunk"
+    )
+    has_overlap_with_next: bool = Field(
+        default=False, description="Whether this chunk overlaps with next chunk"
+    )
+    overlap_content: str | None = Field(default=None, description="Actual overlapping text content")
+    is_first_chunk: bool = Field(default=False, description="Whether this is the first chunk")
+    is_last_chunk: bool = Field(default=False, description="Whether this is the last chunk")
 
 
 class ContextManager:
@@ -67,17 +82,13 @@ class ContextManager:
     def __init__(
         self,
         agent: Agent,
-        max_context_tokens: int | None = None,
         overlap_tokens: int = 200,
-        reserved_output_tokens: int | None = None,
     ) -> None:
         """Initialize the ContextManager.
 
         Args:
             agent: Agno Agent instance
-            max_context_tokens: Maximum context window tokens for the model
             overlap_tokens: Target overlap size in tokens between chunks
-            reserved_output_tokens: Tokens to reserve for model output
 
         Raises:
             InvalidChunkSizeError: If agent configuration is invalid
@@ -91,35 +102,14 @@ class ContextManager:
         self._agent = agent
         self._model_id = agent.model.id
 
-        # Resolve max_context_tokens
-        if max_context_tokens is not None:
-            self._max_context_tokens = max_context_tokens
-        elif hasattr(agent, "max_context_tokens"):
-            self._max_context_tokens = getattr(agent, "max_context_tokens")
-        else:
-            try:
-                # Try to get from litellm model cost
-                model_info = litellm.model_cost.get(self._model_id)
-                if model_info and "max_input_tokens" in model_info:
-                    self._max_context_tokens = int(model_info["max_input_tokens"])
-                else:
-                    # Fallback to standard get_max_tokens
-                    self._max_context_tokens = litellm.get_max_tokens(self._model_id) or 128000
-            except Exception:
-                # Default fallback if litellm fails
-                self._max_context_tokens = 128000
+        self._max_context_tokens = litellm.get_max_tokens(self._model_id)
+        if self._max_context_tokens is None:
+            raise InvalidChunkSizeError(
+                f"Could not determine max tokens for model: {self._model_id}"
+            )
 
         self._overlap_tokens = overlap_tokens
-
-        # Resolve reserved_output_tokens
-        if reserved_output_tokens is not None:
-            self._reserved_output_tokens = reserved_output_tokens
-        elif hasattr(agent, "reserved_output_tokens"):
-            self._reserved_output_tokens = getattr(agent, "reserved_output_tokens")
-        elif hasattr(agent.model, "max_tokens") and agent.model.max_tokens is not None:
-            self._reserved_output_tokens = agent.model.max_tokens
-        else:
-            self._reserved_output_tokens = 4000
+        self._reserved_output_tokens = 4000
 
         self._agent_overhead_tokens: int | None = None
 
@@ -148,7 +138,9 @@ class ContextManager:
         """
         return self._model_id
 
-    def calculate_agent_overhead(self, session: AgentSession | None = None) -> int:
+    def _calculate_agent_overhead(
+        self, session: AgentSession | TeamSession | WorkflowSession | None = None
+    ) -> int:
         """Calculate tokens used by agent configuration.
 
         Args:
@@ -175,11 +167,11 @@ class ContextManager:
             try:
                 system_message = self._agent.get_system_message(session)  # type: ignore[reportUnknownMemberType]
                 if system_message:
-                    message_content = (
-                        str(system_message.content)
-                        if hasattr(system_message, "content")
-                        else str(system_message)
-                    )
+                    # Check if system_message has a content attribute using isinstance
+                    if isinstance(system_message, Message):
+                        message_content = str(system_message.content)
+                    else:
+                        message_content = str(system_message)
                     overhead_parts.append(message_content)
             except Exception:
                 pass
@@ -199,7 +191,7 @@ class ContextManager:
             Number of tokens available for user message
         """
         if self._agent_overhead_tokens is None:
-            self.calculate_agent_overhead(session)
+            self._calculate_agent_overhead(session)
 
         available = (
             self._max_context_tokens
@@ -235,12 +227,13 @@ class ContextManager:
 
         max_chunk_tokens = available_tokens - self._overlap_tokens
         paragraphs = self._split_paragraphs(user_message)
-        raw_chunks = self._accumulate_chunks(paragraphs, max_chunk_tokens)
+        raw_chunks, split_info = self._accumulate_chunks(paragraphs, max_chunk_tokens, user_message)
 
-        return self._apply_overlap_and_create_chunks(raw_chunks, user_message)
+        return self._apply_overlap_and_create_chunks_with_info(raw_chunks, user_message, split_info)
 
     def _create_single_chunk(self, text: str) -> TextChunk:
         """Create a single chunk for text that fits within limits."""
+        boundary_type = self._determine_boundary_type(text)
         return TextChunk(
             chunk_index=0,
             total_chunks=1,
@@ -250,7 +243,14 @@ class ContextManager:
             end_char=len(text),
             overlap_start_char=None,
             overlap_end_char=None,
-            boundary_type="none",
+            boundary_type=boundary_type,
+            split_reason="natural",
+            split_boundary=boundary_type,
+            has_overlap_with_previous=False,
+            has_overlap_with_next=False,
+            overlap_content=None,
+            is_first_chunk=True,
+            is_last_chunk=True,
         )
 
     def _split_paragraphs(self, text: str) -> list[str]:
@@ -266,9 +266,12 @@ class ContextManager:
         """Split text into words."""
         return [w for w in text.split() if w.strip()]
 
-    def _accumulate_chunks(self, paragraphs: list[str], max_chunk_tokens: int) -> list[str]:
+    def _accumulate_chunks(
+        self, paragraphs: list[str], max_chunk_tokens: int, original_text: str
+    ) -> tuple[list[str], list[dict[str, str]]]:
         """Accumulate paragraphs into chunks respecting token limits."""
         chunks: list[str] = []
+        split_info: list[dict[str, str]] = []
         current_chunk = ""
         current_tokens = 0
 
@@ -282,9 +285,14 @@ class ContextManager:
             else:
                 if current_chunk:
                     chunks.append(current_chunk)
+                    split_info.append({"split_reason": "natural", "split_boundary": "paragraph"})
 
                 if para_tokens > max_chunk_tokens:
-                    chunks.extend(self._split_large_paragraph(para, max_chunk_tokens))
+                    sub_chunks, sub_info = self._split_large_paragraph_with_info(
+                        para, max_chunk_tokens
+                    )
+                    chunks.extend(sub_chunks)
+                    split_info.extend(sub_info)
                     current_chunk = ""
                     current_tokens = 0
                 else:
@@ -293,24 +301,28 @@ class ContextManager:
 
         if current_chunk:
             chunks.append(current_chunk)
+            split_info.append({"split_reason": "natural", "split_boundary": "paragraph"})
 
-        return chunks
+        return chunks, split_info
 
-    def _split_large_paragraph(self, para: str, max_chunk_tokens: int) -> list[str]:
+    def _split_large_paragraph_with_info(
+        self, para: str, max_chunk_tokens: int
+    ) -> tuple[list[str], list[dict[str, str]]]:
         """Split a large paragraph that exceeds token limits."""
         para_tokens = self.count_tokens(para)
 
         if para_tokens <= max_chunk_tokens:
-            return [para]
+            return [para], [{"split_reason": "natural", "split_boundary": "paragraph"}]
 
         sentences = self._split_sentences(para)
-        return self._accumulate_units(sentences, "sentence", max_chunk_tokens)
+        return self._accumulate_units_with_info(sentences, "sentence", max_chunk_tokens)
 
-    def _accumulate_units(
+    def _accumulate_units_with_info(
         self, units: list[str], unit_type: str, max_chunk_tokens: int
-    ) -> list[str]:
-        """Accumulate units (sentences/words) into chunks."""
+    ) -> tuple[list[str], list[dict[str, str]]]:
+        """Accumulate units (sentences/words) into chunks with split info."""
         chunks: list[str] = []
+        split_info: list[dict[str, str]] = []
         current_chunk = ""
         current_tokens = 0
 
@@ -320,14 +332,24 @@ class ContextManager:
             if unit_tokens > max_chunk_tokens:
                 if current_chunk:
                     chunks.append(current_chunk)
+                    split_info.append({"split_reason": "token_limit", "split_boundary": unit_type})
                     current_chunk = ""
                     current_tokens = 0
 
                 if unit_type == "sentence":
                     words = self._split_words(unit)
-                    chunks.extend(self._accumulate_units(words, "word", max_chunk_tokens))
+                    sub_chunks, sub_info = self._accumulate_units_with_info(
+                        words, "word", max_chunk_tokens
+                    )
+                    chunks.extend(sub_chunks)
+                    split_info.extend(sub_info)
                 else:
-                    chunks.extend(self._force_split_by_tokens(unit, max_chunk_tokens))
+                    sub_chunks = self._force_split_by_tokens(unit, max_chunk_tokens)
+                    chunks.extend(sub_chunks)
+                    split_info.extend(
+                        [{"split_reason": "forced", "split_boundary": "character"}]
+                        * len(sub_chunks)
+                    )
                 continue
 
             if current_tokens + unit_tokens <= max_chunk_tokens:
@@ -337,13 +359,15 @@ class ContextManager:
             else:
                 if current_chunk:
                     chunks.append(current_chunk)
+                    split_info.append({"split_reason": "token_limit", "split_boundary": unit_type})
                 current_chunk = unit
                 current_tokens = unit_tokens
 
         if current_chunk:
             chunks.append(current_chunk)
+            split_info.append({"split_reason": "natural", "split_boundary": unit_type})
 
-        return chunks
+        return chunks, split_info
 
     def _force_split_by_tokens(self, text: str, max_chunk_tokens: int) -> list[str]:
         """Force split text by character approximation when it exceeds token limits."""
@@ -370,41 +394,57 @@ class ContextManager:
 
         return chunks
 
-    def _apply_overlap_and_create_chunks(
-        self, raw_chunks: list[str], original_text: str
+    def _apply_overlap_and_create_chunks_with_info(
+        self, raw_chunks: list[str], original_text: str, split_info: list[dict[str, str]]
     ) -> list[TextChunk]:
         """Apply overlap between chunks and create TextChunk objects with metadata."""
         if not raw_chunks:
             return []
 
         if len(raw_chunks) == 1:
-            return [self._create_single_chunk(raw_chunks[0])]
+            chunk = self._create_single_chunk(raw_chunks[0])
+            # Update with split info if provided
+            if split_info:
+                info = split_info[0]
+                chunk.split_reason = info.get("split_reason", "natural")
+                chunk.split_boundary = info.get("split_boundary", chunk.boundary_type)
+            return [chunk]
 
         result_chunks: list[TextChunk] = []
+
+        # Track positions more reliably by accumulating from the start
+        char_positions: list[tuple[int, int]] = []
         current_pos = 0
+        for chunk in raw_chunks:
+            # Find the chunk from current position, but be more robust
+            found_pos = original_text.find(chunk, current_pos)
+            if found_pos == -1:
+                # If not found, just append at current position (handles edge cases)
+                found_pos = current_pos
+            char_positions.append((found_pos, found_pos + len(chunk)))
+            current_pos = found_pos + len(chunk)
 
         for i, chunk_text in enumerate(raw_chunks):
-            chunk_start = original_text.find(chunk_text, current_pos)
-            if chunk_start == -1:
-                chunk_start = current_pos
+            chunk_start, chunk_end = char_positions[i]
+            boundary_type = self._determine_boundary_type(chunk_text)
 
-            chunk_end = chunk_start + len(chunk_text)
+            # Get split info for this chunk
+            info = split_info[i] if i < len(split_info) else {}
+            split_reason = info.get("split_reason", "token_limit")
+            split_boundary = info.get("split_boundary", boundary_type)
 
-            overlap_start = None
-            overlap_end = None
+            # Determine overlap information
+            overlap_content = None
+            has_overlap_prev = False
+            has_overlap_next = False
 
             if i > 0:
-                overlap_text = self._find_overlap_with_previous(raw_chunks[i - 1], chunk_text)
-                if overlap_text:
-                    overlap_start = chunk_start
-                    overlap_end = chunk_start + len(overlap_text)
+                overlap_content = self._find_overlap_with_previous(raw_chunks[i - 1], chunk_text)
+                has_overlap_prev = bool(overlap_content)
 
             if i < len(raw_chunks) - 1:
-                overlap_text_next = self._find_overlap_with_next(chunk_text, raw_chunks[i + 1])
-                if overlap_text_next:
-                    overlap_end = chunk_end
-
-            boundary_type = self._determine_boundary_type(chunk_text)
+                next_overlap = self._find_overlap_with_next(chunk_text, raw_chunks[i + 1])
+                has_overlap_next = bool(next_overlap)
 
             result_chunks.append(
                 TextChunk(
@@ -414,13 +454,19 @@ class ContextManager:
                     token_count=self.count_tokens(chunk_text),
                     start_char=chunk_start,
                     end_char=chunk_end,
-                    overlap_start_char=overlap_start,
-                    overlap_end_char=overlap_end,
+                    overlap_start_char=chunk_start if has_overlap_prev else None,
+                    overlap_end_char=chunk_end if has_overlap_next else None,
                     boundary_type=boundary_type,
+                    # Enhanced marking fields
+                    split_reason=split_reason,
+                    split_boundary=split_boundary,
+                    has_overlap_with_previous=has_overlap_prev,
+                    has_overlap_with_next=has_overlap_next,
+                    overlap_content=overlap_content,
+                    is_first_chunk=(i == 0),
+                    is_last_chunk=(i == len(raw_chunks) - 1),
                 )
             )
-
-            current_pos = chunk_end
 
         return result_chunks
 

@@ -1,65 +1,51 @@
-"""Integration test utilities."""
+"""Integration test utilities for Agno evals."""
 
 from __future__ import annotations
 
 import os
+import sys
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Union
 
-import scenario
+# Add the src directory to the path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
+
 from agno.agent.agent import Agent
 from agno.db.in_memory import InMemoryDb
-from agno.models.message import Message
 from agno.models.openai import OpenAIChat
 from pydantic import BaseModel
 
+if TYPE_CHECKING:
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
+    from agno.session import AgentSession, TeamSession
+    from agno.team import Team
 
-class CustomAgentAdapter(scenario.AgentAdapter):
-    """Custom adapter that wraps agno agents for scenario framework."""
+# Global registry to store agent references for validators
+AGENT_REGISTRY: dict[str, Agent] = {}
 
-    def __init__(self, agent: Agent):
-        """Initialize the adapter with an agno agent."""
-        self.agent = agent
-        self._responses = []
+# Define proper hook type signatures to match Agno's expectations
+PreHookType = Callable[
+    [
+        Union[Agent, "Team"],
+        Any,  # RunInput
+        Union["AgentSession", "TeamSession"],
+        str,  # user_id
+        bool,  # debug_mode
+    ],
+    Any,
+]
 
-    async def call(self, input: scenario.AgentInput) -> scenario.AgentReturnTypes:
-        # Get the current message count to identify new messages
-        take_from = None
-
-        try:
-            take_from = len(self.agent.get_messages_for_session(input.thread_id)) + 1
-        except Exception:
-            take_from = 0
-            pass
-
-        # Run the Agno agent with the latest user message
-        result = self.agent.run(input.last_new_user_message_str(), session_id=input.thread_id)
-
-        # Extract only the new messages that were added during this call
-        new_messages: list[Message] = (result.messages or [])[take_from:]
-
-        # Format messages for Scenario (OpenAI format)
-        openai_formatted_messages = [
-            OpenAIChat()._format_message(message) for message in new_messages
-        ]
-
-        for msg in openai_formatted_messages:
-            if msg["role"] == "developer":
-                msg["role"] = "system"
-
-        return openai_formatted_messages  # type: ignore
-
-    def get_last_response(self) -> str | None:
-        """Get the last response content."""
-        if self._responses:
-            return self._responses[-1].content
-        return None
-
-    def get_all_responses(self) -> list[str]:
-        """Get all response contents."""
-        return [resp.content for resp in self._responses]
-
-    def reset(self) -> None:
-        """Reset the adapter state."""
-        self._responses.clear()
+PostHookType = Callable[
+    [
+        Union[Agent, "Team"],
+        Union["RunOutput", "TeamRunOutput"],
+        Union["AgentSession", "TeamSession"],
+        str,  # user_id
+        bool,  # debug_mode
+    ],
+    Any,
+]
 
 
 def create_agent_with_adapter(
@@ -69,7 +55,9 @@ def create_agent_with_adapter(
     base_url: str | None = None,
     model_id: str | None = None,
     output_schema: type[BaseModel] | None = None,
-) -> CustomAgentAdapter:
+    pre_hooks: list[PreHookType] | None = None,
+    post_hooks: list[PostHookType] | None = None,
+) -> AgentWrapper:
     """Create an agno agent wrapped in our custom adapter."""
     # Use environment variables if not provided
     if api_key is None:
@@ -82,24 +70,72 @@ def create_agent_with_adapter(
     # Create LLM and agent
     llm = OpenAIChat(api_key=api_key, base_url=base_url, id=model_id)
 
+    # Use InMemoryDb that supports both sync and async operations
+    db = InMemoryDb()
+
     agent = Agent(
         model=llm,
         name=name,
         instructions=instructions,
         output_schema=output_schema,
-        db=InMemoryDb(),
+        db=db,
+        debug_mode=True,
+        debug_level=2,
+        pre_hooks=pre_hooks or [],  # type: ignore
+        post_hooks=post_hooks or [],  # type: ignore
+    )
+
+    return AgentWrapper(agent)
+
+
+def create_judge_agent(
+    criteria: list[str] | None = None,
+    instructions: str | None = None,
+    name: str = "JudgeAgent",
+    use_async: bool = False,
+) -> Agent:
+    """Create a judge agent for evaluation."""
+    # Use environment variables if not provided
+    api_key = os.getenv("BLOCKETHER_LLM_API_KEY")
+    base_url = os.getenv("BLOCKETHER_LLM_API_BASE_URL")
+    model_id = os.getenv("BLOCKETHER_LLM_DEFAULT_MODEL", "gpt-4o")
+
+    if criteria and not instructions:
+        instructions = f"""You are a judge agent evaluating responses based on these criteria:
+
+        {chr(10).join(f"- {criterion}" for criterion in criteria)}
+
+        Score responses from 0-10 where:
+        10 = Perfect, meets all criteria
+        8-9 = Excellent, meets most criteria with minor issues
+        6-7 = Good, meets some criteria but has noticeable issues
+        0-5 = Poor, fails most or all criteria
+
+        Be fair but strict in your evaluation."""
+
+    # Create LLM and agent
+    llm = OpenAIChat(api_key=api_key, base_url=base_url, id=model_id)
+
+    # Use InMemoryDb that supports both sync and async operations
+    db = InMemoryDb()
+
+    return Agent(
+        model=llm,
+        name=name,
+        instructions=instructions or "You are a judge agent evaluating responses.",
+        db=db,
         debug_mode=True,
         debug_level=2,
     )
 
-    return CustomAgentAdapter(agent)
 
+class AgentWrapper:
+    """Wrapper that provides both agent and adapter-like interface."""
 
-def create_judge_agent(criteria: list[str] | None = None) -> scenario.JudgeAgent:
-    """Create a judge agent for scenario validation."""
-    return scenario.JudgeAgent(
-        model=os.getenv("BLOCKETHER_LLM_DEFAULT_MODEL", "openai/gpt-4o"),
-        api_key=os.getenv("BLOCKETHER_LLM_API_KEY"),
-        base_url=os.getenv("BLOCKETHER_LLM_API_BASE_URL"),
-        criteria=criteria,
-    )
+    def __init__(self, agent: Agent):
+        self.agent = agent
+        self.name = agent.name
+
+    def get_agent(self) -> Agent:
+        """Get the underlying Agno agent."""
+        return self.agent

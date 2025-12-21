@@ -82,8 +82,8 @@ Keep conversation state consistent and stop translating only if the user explici
         "secondary_language": None,
     },
     add_session_state_to_context=True,
-    read_chat_history=True,
     num_history_messages=8,
+    add_history_to_context=True,
     markdown=False,
-    debug_mode=True,
+    debug_mode=False,
 )

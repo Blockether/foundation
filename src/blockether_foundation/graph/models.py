@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, TypeVar, cast
 
@@ -14,67 +14,23 @@ from ..utils import generate_secure_id
 T = TypeVar("T", bound="TimestampMixin")
 
 EntityType = Literal[
-    "acronym",
-    "keyword",
-    "tool",
-    "library",
-    "person",
+    "creature",
     "organization",
     "location",
     "event",
     "date",
     "document",
-    "image",
-    "audio",
-    "video",
-    "code_snippet",
-    "url",
-    "product",
-    "rule",
+    "attachment",
+    "object",
     "concept",
-    "acronym_definition",
-    "keyword_definition",
-    "concept_context",
-    "event_context",
-    "date_context",
-    "product_context",
-    "rule_context",
-    "image_context",
-    "document_context",
-    "audio_context",
-    "video_context",
-    "code_snippet_context",
-    "url_context",
+    "example",
+    "rule",
+    "pattern",
+    "memory",
 ]
 
 RelationType = Literal[
-    "part_of",
-    "contains",
-    "belongs_to",
-    "instance_of",
-    "related_to",
-    "acronym_for",
-    "synonym_of",
-    "keyword_for",
-    "opposite_of",
-    "similar_to",
-    "replaces",
-    "created_by",
-    "modified_by",
-    "implements",
-    "depends_on",
-    "uses",
-    "used_for",
-    "before",
-    "after",
-    "referenced_by",
-    "referenced",
-    "applies_to",
-    "learned_from",
-    "improves_upon",
-    "contradicts",
-    "validates",
-    "invalidates",
+    "part_of", "owned_by", "occurs_at", "related_to", "triggers", "originates_from"
 ]
 
 
@@ -85,10 +41,10 @@ class TimestampMixin:
         """Convert to dictionary with automatic datetime serialization."""
         # Convert object to dict manually since asdict doesn't work with mixins
         data: dict[str, Any] = {}
-        if hasattr(self, "__dataclass_fields__"):
-            dataclass_fields = cast(dict[str, Any], self.__dataclass_fields__)  # type: ignore[attr-defined]
+        if is_dataclass(self):
+            dataclass_fields = cast(dict[str, Any], self.__dataclass_fields__)
             for key in dataclass_fields:
-                value = getattr(self, key)
+                value = self.__dict__.get(key)
                 if isinstance(value, datetime):
                     data[key] = value.isoformat()
                 else:
@@ -99,12 +55,12 @@ class TimestampMixin:
     def from_dict(cls: type[T], data: dict[str, Any]) -> T:
         """Create from dictionary with automatic datetime deserialization."""
         data = data.copy()
-        if hasattr(cls, "__dataclass_fields__"):
-            dataclass_fields = cast(dict[str, Any], cls.__dataclass_fields__)  # type: ignore[attr-defined]
+        if is_dataclass(cls):
+            dataclass_fields = cast(dict[str, Any], cls.__dataclass_fields__)
             for field_name, field_obj in dataclass_fields.items():
                 if field_name in data and isinstance(data[field_name], str):
                     # Check if field type is datetime (using string comparison to handle type differences)
-                    field_type_str = str(getattr(field_obj, "type", ""))
+                    field_type_str = str(field_obj.type)
                     if "datetime" in field_type_str:
                         data[field_name] = datetime.fromisoformat(data[field_name].__str__())
 
@@ -148,6 +104,10 @@ class LLMGraphAddEntity(ChainOfThoughts):
     )
     type: EntityType = Field(description="Type of the entity.")
     content: str = Field(description="Content or description of the entity.")
+    importance: float | None = Field(
+        default=None,
+        description="Importance score of the entity (0.0 to 1.0). Optional field for prioritization.",
+    )
 
     def __post__init__(self) -> None:
         self.id = generate_secure_id(size=8)
@@ -175,6 +135,10 @@ class LLMGraphAddRelationship(ChainOfThoughts):
     source_name: str = Field(description="Human-readable name of the source entity.")
     target_name: str = Field(description="Human-readable name of the target entity.")
     type: RelationType = Field(description="Type of the relationship.")
+    importance: float | None = Field(
+        default=None,
+        description="Importance score of the relationship (0.0 to 1.0). Optional field for prioritization.",
+    )
 
     def __post__init__(self) -> None:
         self.id = f"{self.source_name}_{self.target_name}"
@@ -201,6 +165,10 @@ class LLMGraphOperations(ChainOfThoughts):
     )
     delete_relationship_ops: list[LLMGraphDeleteRelationship] = Field(
         description="List of delete relationship operations."
+    )
+    importance: float | None = Field(
+        default=None,
+        description="Overall importance score of the operations set (0.0 to 1.0). Optional field for prioritization.",
     )
 
     @property
@@ -367,3 +335,33 @@ class LLMGraphQueryOperations(ChainOfThoughts):
             *self.entity_queries,
             *self.relationship_queries,
         ]
+
+
+class QualityAssessment(ChainOfThoughts):
+    """LLM assessment of retrieved context quality for iterative improvement.
+
+    Used by the graph pre-hook to evaluate whether retrieved context
+    is sufficient to answer the user's request, enabling iterative
+    query refinement.
+    """
+
+    satisfied: bool = Field(
+        description="Is the retrieved context sufficient to answer the user's request?"
+    )
+    quality_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Quality score from 0.0 (poor) to 1.0 (excellent) based on relevance and completeness",
+    )
+    coverage_gaps: list[str] = Field(
+        default_factory=list,
+        description="List of missing information or topics not covered by current context",
+    )
+    interesting_entities: list[str] = Field(
+        default_factory=list,
+        description="Entity names (from current results) worth expanding via BFS to gather more context",
+    )
+    suggested_refinements: list[str] = Field(
+        default_factory=list,
+        description="Suggestions for improving existing queries (broader search, different types, etc.)",
+    )

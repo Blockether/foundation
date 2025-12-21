@@ -1,6 +1,6 @@
 from abc import abstractmethod
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, override
 
 from pydantic import BaseModel, Field
 
@@ -10,7 +10,6 @@ from ...models import ChainOfThoughts
 # helpful: Content that provides value, solves problems, or improves understanding
 # harmful: Content that causes confusion, misleads, or has negative impact
 # neutral: Content that is factual but neither particularly helpful nor harmful
-type EntryMetadataStatistic = Literal["helpful", "harmful", "neutral"]
 
 
 class PatternSituation(BaseModel):
@@ -84,8 +83,8 @@ class BaseSectionEntry(BaseModel):
         default_factory=lambda: datetime.now(UTC),
         description="Timestamp when entry was last modified. Uses UTC timezone.",
     )
-    metadata: dict[EntryMetadataStatistic, int] = Field(
-        default_factory=dict,
+    metadata: dict[str, int] = Field(
+        default_factory=lambda: {"helpful": 0, "harmful": 0, "neutral": 0},
         description="Dictionary tracking user feedback statistics. Keys are 'helpful', 'harmful', 'neutral' with integer counts representing user ratings.",
     )
 
@@ -110,6 +109,10 @@ class DomainKnowledge(BaseSectionEntry):
     content: str = Field(description="Domain knowledge content in pure markdown format.")
     domain: str = Field(description="Domain to which the knowledge applies. Always lowercased.")
 
+    @override
+    def entry_to_markdown(self) -> str:
+        return self.content
+
 
 class GroundTruthProof(BaseModel):
     title: str = Field(description="Title of the proof")
@@ -132,6 +135,7 @@ class GroundTruth(BaseSectionEntry):
         description="List of proofs supporting the ground truth."
     )
 
+    @override
     def entry_to_markdown(self) -> str:
         return f"""
         ## {self.title}

@@ -13,7 +13,7 @@ import os
 from collections.abc import Callable
 from re import split
 from textwrap import dedent
-from typing import Any, cast
+from typing import Any, Protocol, cast, runtime_checkable
 
 from agno.agent import Agent, AgentSession
 from agno.db.in_memory import InMemoryDb
@@ -22,10 +22,10 @@ from agno.models.base import Model
 from agno.models.message import Message
 from agno.models.openai import OpenAIChat
 from agno.models.utils import get_model
-from agno.run.agent import RunInput
+from agno.run.agent import RunInput, RunOutput
 from agno.session import TeamSession
 from agno.team import Team
-from agno.utils.log import log_debug
+from agno.utils.log import log_debug  # type: ignore
 from agno.workflow import Step, StepInput, StepOutput, Workflow
 from openai.types import ReasoningEffort
 from pydantic import BaseModel, Field
@@ -37,6 +37,22 @@ from .models.program.generator import GeneratorOutput
 from .models.program.reflector import ReflectorOutput
 from .playbook import Playbook
 
+# Define a concrete type for GeneratorOutput to avoid generic type issues
+type GeneratorOutputType = GeneratorOutput[Any]
+
+# Define type aliases for agno types
+type InputContentType = (
+    str
+    | list[Any]  # Covers List[Unknown], List[str], List[Message], etc.
+    | dict[str, Any]  # Covers Dict[Unknown, Unknown]
+    | Message
+    | BaseModel  # Include BaseModel which is used in RunInput.input_content
+    | list[Message]
+    | None
+)
+
+type ExecutorResult = str | Any
+
 logging.basicConfig(
     level=logging.DEBUG,
     filename="app.log",
@@ -46,6 +62,14 @@ logging.basicConfig(
 
 type UserId = str | None
 type DebugMode = bool | None
+
+
+@runtime_checkable
+class SupportsReasoning(Protocol):
+    """Protocol for models that support reasoning configuration."""
+
+    reasoning: dict[str, Any] | None
+
 
 model = OpenAIChat(
     id="gpt-4o",
@@ -74,7 +98,7 @@ class AceProgram(BaseModelSerializable):
         default=True,
         description="Whether to enable consensus-building across multiple models or agents",
     )
-    consensus_models: list[Model] = Field(
+    consensus_models: list[Model] = Field(  # type: ignore
         default_factory=list,
         description=("List of models to use for consensus-building if enabled."),
     )
@@ -151,7 +175,7 @@ class AceProgram(BaseModelSerializable):
     </METADATA>
 </PHASE>"""
         )
-        response = executor.run(stream=False, input=full_phase_input)
+        response = executor.run(stream=False, input=full_phase_input)  # type: ignore
         content = cast(AnalysisOutput, response.content)
         log_debug(f"Analysis step response: {content}")
 
@@ -163,7 +187,7 @@ class AceProgram(BaseModelSerializable):
         output_schema: type[BaseModel] | None,
         model: Model | None | str = None,
     ) -> Agent | Team:
-        changes = {
+        changes: dict[str, Any] = {
             "executor": executor,
             "pre_hooks": [],
             "post_hooks": [],
@@ -177,10 +201,10 @@ class AceProgram(BaseModelSerializable):
         }
 
         if output_schema:
-            changes["output_schema"] = output_schema  # type: ignore
+            changes["output_schema"] = output_schema
 
         if model:
-            changes["model"] = model  # type: ignore
+            changes["model"] = model
 
         valid_params = inspect.signature(executor.__class__).parameters
         valid_changes = {k: v for k, v in changes.items() if k in valid_params}
@@ -226,33 +250,39 @@ class AceProgram(BaseModelSerializable):
         if not effort:
             return model_with_reasoning
 
-        if not hasattr(model_with_reasoning, "reasoning"):
-            log_debug(
-                f"Model '{model_with_reasoning.name}' does not support reasoning effort settings."
+        if not isinstance(model_with_reasoning, SupportsReasoning):
+            model_name = (
+                model_with_reasoning.name
+                if isinstance(model_with_reasoning, Model) and model_with_reasoning.name
+                else "Unknown"
             )
+            log_debug(f"Model '{model_name}' does not support reasoning effort settings.")
             return model_with_reasoning
 
-        log_debug(f"Setting reasoning effort '{effort}' for model '{model_with_reasoning.name}'")
+        model_name = (
+            model_with_reasoning.name
+            if isinstance(model_with_reasoning, Model) and model_with_reasoning.name
+            else "Unknown"
+        )
+        log_debug(f"Setting reasoning effort '{effort}' for model '{model_name}'")
 
-        setattr(model_with_reasoning, "reasoning", {"effort": effort})  # noqa: B010
+        reasoning_model = cast(SupportsReasoning, model_with_reasoning)
+        reasoning_model.reasoning = {"effort": effort}
 
-        return model_with_reasoning
+        return cast(Model, reasoning_model)
 
     def _resolve_model(self, model: str | Model) -> Model:
-        resolved_model = None
-
         if isinstance(model, str):
             provider, model_name = split(":", model)
             if not model_name and provider:
                 provider, model_name = split("/", model)
                 if not model_name and not provider:
                     raise ValueError("Invalid model string provided.")
-                resolved_model = get_model(model_name, provider)  # type: ignore
+                return cast(Model, get_model(model_name, provider))  # type: ignore
             else:
-                resolved_model = get_model(model_name, provider)  # type: ignore
+                return cast(Model, get_model(model_name, provider))  # type: ignore
         else:
-            resolved_model = model
-        return resolved_model
+            return model
 
     def _reasoning_effort_from_analysis(
         self, analysis_step: AnalysisOutput
@@ -262,7 +292,7 @@ class AceProgram(BaseModelSerializable):
     def _generator_step(self, executor: Agent | Team, playbook: Playbook) -> Step:
         def step_executor(input: StepInput) -> StepOutput:
             previous_step: AnalysisOutput = cast(AnalysisOutput, input.previous_step_content)
-            model_with_reasoning = self._model_with_reasoning(
+            self._model_with_reasoning(
                 self.generator_model,
                 effort=self._reasoning_effort_from_analysis(previous_step),
             )
@@ -289,7 +319,9 @@ class AceProgram(BaseModelSerializable):
                 """
             )
 
-            response = stateless_executor.run(full_phase_input, stream=False)
+            response = stateless_executor.run(full_phase_input, stream=False)  # type: ignore
+            if not isinstance(response, RunOutput):
+                raise ValueError(f"Expected RunOutput, got {type(response)}")
 
             return StepOutput(
                 content=response.content,
@@ -307,7 +339,7 @@ class AceProgram(BaseModelSerializable):
 
     def _reflector_step(self, executor: Agent | Team, playbook: Playbook) -> Step:
         def step_executor(input: StepInput) -> StepOutput:
-            previous_step: GeneratorOutput = cast(GeneratorOutput, input.previous_step_content)
+            previous_step = cast(GeneratorOutputType, input.previous_step_content)
 
             full_phase_input = dedent(
                 f"""
@@ -327,15 +359,15 @@ class AceProgram(BaseModelSerializable):
 
 <GENERATION_RESPONSE>
     <REASONING>
-        {previous_step.reasoning}
+        {previous_step.reasoning if isinstance(previous_step, GeneratorOutput) and previous_step.reasoning else ""}
     </REASONING>
 
     <GROUND_TRUTHS_USED>
-        {previous_step.ground_truths_used if previous_step.ground_truths_used else ""}
+        {previous_step.ground_truths_used if isinstance(previous_step, GeneratorOutput) and previous_step.ground_truths_used else ""}
     </GROUND_TRUTHS_USED>
 
     <ANSWER>
-        {previous_step.answer}
+        {previous_step.answer if isinstance(previous_step, GeneratorOutput) and previous_step.answer else ""}
     </ANSWER>
 </GENERATION_RESPONSE>
                 """
@@ -343,7 +375,9 @@ class AceProgram(BaseModelSerializable):
 
             stateless_executor = self._stateless_agno_executor(executor, ReflectorOutput)
 
-            response = stateless_executor.run(full_phase_input, stream=False)
+            response = stateless_executor.run(full_phase_input, stream=False)  # type: ignore
+            if not isinstance(response, RunOutput):
+                raise ValueError(f"Expected RunOutput, got {type(response)}")
 
             return StepOutput(
                 content=response.content,
@@ -381,23 +415,23 @@ class AceProgram(BaseModelSerializable):
 
 <REFLECTION_PHASE>
     <REASONING>
-        {previous_step.reasoning}
+        {previous_step.reasoning if isinstance(previous_step, ReflectorOutput) and previous_step.reasoning else ""}
     </REASONING>
 
     <ERROR_IDENTIFICATION>
-        {previous_step.error_identification or ""}
+        {previous_step.error_identification if isinstance(previous_step, ReflectorOutput) and previous_step.error_identification else ""}
     </ERROR_IDENTIFICATION>
 
     <ROOT_CAUSE_ANALYSIS>
-        {previous_step.root_cause_analysis or ""}
+        {previous_step.root_cause_analysis if isinstance(previous_step, ReflectorOutput) and previous_step.root_cause_analysis else ""}
     </ROOT_CAUSE_ANALYSIS>
 
     <CORRECT_APPROACH>
-        {previous_step.correct_approach or ""}
+        {previous_step.correct_approach if isinstance(previous_step, ReflectorOutput) and previous_step.correct_approach else ""}
     </CORRECT_APPROACH>
 
     <KEY_INSIGHTS>
-        {previous_step.key_insights or ""}
+        {previous_step.key_insights if isinstance(previous_step, ReflectorOutput) and previous_step.key_insights else ""}
     </KEY_INSIGHTS>
 </REFLECTION_PHASE>
 
@@ -407,7 +441,9 @@ class AceProgram(BaseModelSerializable):
 
             stateless_executor = self._stateless_agno_executor(executor, CuratorOutput)
 
-            response = stateless_executor.run(full_phase_input, stream=False)
+            response = stateless_executor.run(full_phase_input, stream=False)  # type: ignore
+            if not isinstance(response, RunOutput):
+                raise ValueError(f"Expected RunOutput, got {type(response)}")
 
             return StepOutput(
                 content=response.content,
@@ -442,7 +478,7 @@ class AceProgram(BaseModelSerializable):
         agent_input_schema: type[BaseModel],
     ) -> Any:
         try:
-            response = self.generator_model.invoke(
+            response = self.generator_model.invoke(  # type: ignore
                 messages=[
                     Message(
                         role="system",
@@ -452,8 +488,7 @@ class AceProgram(BaseModelSerializable):
                 ],
                 response_format=agent_input_schema,
             )
-
-            if not response.content:
+            if not response or not response.content:
                 raise ValueError(
                     "Coercer model returned empty content when trying to coerce to agno input schema."
                 )
@@ -481,7 +516,14 @@ class AceProgram(BaseModelSerializable):
 
             self._set_session_playbook(session, playbook)
 
-            user_request_content = f"\n\n<USER_REQUEST>{run_input.input_content}</USER_REQUEST>"
+            # Extract input content with proper typing
+            input_content_value: str
+            if isinstance(run_input, RunInput) and run_input.input_content is not None:  # type: ignore
+                # input_content can be various types (str, list, dict, Message, BaseModel)
+                input_content_value = str(run_input.input_content)  # type: ignore
+            else:
+                input_content_value = str(run_input)
+            user_request_content = f"\n\n<USER_REQUEST>{input_content_value}</USER_REQUEST>"
             input_content = (
                 "<PLAYBOOK> defines the execution guidelines and context. <PHASE> if present specifies which decomposed sub-problem or workflow step you are currently addressing."
                 " Using the <PLAYBOOK> and considering the <PHASE>, fulfill the <USER_REQUEST>:"
@@ -501,13 +543,19 @@ class AceProgram(BaseModelSerializable):
                 videos=list(run_input.videos) if run_input.videos else None,
             )
 
+            # Extract result content with proper typing
+            result_content: str
+            if isinstance(result, RunOutput):
+                result_content = cast(str, result.get_content_as_string())  # type: ignore
+            else:
+                result_content = str(result)
             run_input.input_content = (
                 self._coerce_to_agent_input_schema(
-                    result_content=result.get_content_as_string(),
+                    result_content=result_content,
                     agent_input_schema=agent_input_schema,
                 )
                 if agent_input_schema is not None
-                else result.get_content_as_string()
+                else result_content
             )
             # new_play# playbook.apply_deltas(result.get_playbook_deltas())
 
@@ -516,13 +564,12 @@ class AceProgram(BaseModelSerializable):
 
         return hook
 
-    def _get_conversation_history(self, session):
-        history_messages: list[Message] = session.get_messages_for_session()[
-            : self.last_history_messages
-        ]
+    def _get_conversation_history(self, session: AgentSession | TeamSession) -> str:
+        history_messages: list[Message] = cast(list[Message], session.get_messages_for_session())  # type: ignore
+        history_messages = history_messages[: self.last_history_messages]
 
         plain_history_str = "\n".join(
-            f"[{message.created_at}] {message.role}] {message.content}"
+            f"[{message.created_at if isinstance(message, Message) and message.created_at else 'Unknown'}] {message.role if isinstance(message, Message) and message.role else 'Unknown'}] {message.content if isinstance(message, Message) and message.content else ''}"
             for message in history_messages
         )
 

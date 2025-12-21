@@ -1,12 +1,75 @@
+from __future__ import annotations
+
 import base64
 import dataclasses
 import inspect
+import json
+import logging
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import fields
-from typing import Any, TypeVar
+from pathlib import Path
+
+# Import for type hints only
+from typing import TYPE_CHECKING, Any, TypeVar, cast
+
+from agno.agent import Agent
+from agno.media import Audio
+from agno.models.message import Message
+from agno.run.agent import RunInput, RunOutput
+from agno.run.base import RunContext
+from agno.run.team import TeamRunInput, TeamRunOutput
+from agno.session import AgentSession, TeamSession, WorkflowSession
+from agno.team import Team
+from agno.workflow import Workflow
+
+if TYPE_CHECKING:
+    from .graph.database import GraphDatabase
 
 T = TypeVar("T")
+
+
+type UserId = str | None
+type DebugMode = bool | None
+type AgnoExecutor = Agent | Team | Workflow
+type AgnoSession = AgentSession | TeamSession | WorkflowSession
+
+type AgnoPreHook = Callable[
+    [
+        Agent | Team,  # Note: Must use actual types for introspection, not AgnoExecutor
+        RunInput,
+        AgentSession | TeamSession,  # Note: Must use actual types, not AgnoSession
+        UserId,
+        DebugMode,
+    ],
+    None | Coroutine[Any, Any, None],
+]
+
+type AgnoPostHook = Callable[
+    [
+        Agent | Team,  # Note: Must use actual types for introspection, not AgnoExecutor
+        RunOutput | TeamRunOutput,  # The output/response from the agent
+        AgentSession | TeamSession,  # Note: Must use actual types, not AgnoSession
+        RunContext,  # The run context
+        UserId,
+        DebugMode,
+    ],
+    None | Coroutine[Any, Any, None],
+]
+
+logger = logging.getLogger(__name__)
+
+# Type alias for the input_content type
+InputContentType = (
+    str
+    | list[Any]  # This covers List[Unknown], List[str], List[Message], etc.
+    | dict[str, Any]  # This covers Dict[Unknown, Unknown]
+    | Message
+    | list[Message]
+    | None
+)
+
+GLOBAL_AGNO_SESSION_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 
 def none_invariant[T](condition: Callable[..., T | None], message: str) -> T:
@@ -74,12 +137,15 @@ def dataclass_copy[T](obj: T, **kwargs: Any) -> T:
         return obj
 
     # Get the field names of the dataclass that are actually in __init__
-    init_params = set(inspect.signature(obj.__class__.__init__).parameters.keys())
+    init_params = set(inspect.signature(obj.__class__.__init__).parameters.keys())  # type: ignore
+
     # Remove 'self' from init params
-    init_params.discard('self')
+    init_params.discard("self")
 
     # Also filter out internal fields starting with '_'
-    valid_field_names = {f.name for f in fields(obj) if f.name in init_params and not f.name.startswith("_")}
+    valid_field_names = {
+        f.name for f in fields(obj) if f.name in init_params and not f.name.startswith("_")
+    }
 
     # Filter kwargs to only include valid fields
     valid_kwargs = {k: v for k, v in kwargs.items() if k in valid_field_names}
@@ -93,7 +159,9 @@ def dataclass_copy[T](obj: T, **kwargs: Any) -> T:
     current_values: dict[str, Any] = {}
     for field in fields(obj):
         if field.name in init_params and not field.name.startswith("_"):
-            current_values[field.name] = getattr(obj, field.name)
+            # Safely get the field value if it exists in __dict__
+            if field.name in obj.__dict__:
+                current_values[field.name] = obj.__dict__[field.name]
 
     # Update with new values
     current_values.update(valid_kwargs)
@@ -101,3 +169,402 @@ def dataclass_copy[T](obj: T, **kwargs: Any) -> T:
     # Create a new instance directly with the filtered values
     # Use type: ignore to silence type checking issues with dynamic instantiation
     return obj.__class__(**current_values)  # type: ignore[arg-type, return-value]
+
+
+def extract_graph(data: dict[Any, Any], graph_name: str) -> GraphDatabase:
+    """Extract a GraphDatabase instance from session data.
+
+    Args:
+        data: Session data dictionary
+        graph_name: Key name for the graph in the data
+
+    Returns:
+        GraphDatabase instance - either a new empty one or reconstructed from data
+    """
+    if data[graph_name] is None:
+        return GraphDatabase()
+    else:
+        return GraphDatabase.from_dict(data[graph_name])
+
+
+def ensure_session_data(session: AgentSession | TeamSession) -> dict[Any, Any]:
+    """Ensure session has a data dictionary and return it.
+
+    Args:
+        session: Agent or Team session instance
+
+    Returns:
+        The session's data dictionary (creates empty one if none exists)
+    """
+    if not session.session_data:
+        session.session_data = {}
+
+    return session.session_data
+
+
+def get_global_session(
+    executor: AgnoExecutor,
+) -> AgnoSession:
+    """Get or create the global session using GLOBAL_AGNO_SESSION_ID.
+
+    Args:
+        executor: Agent, Team, or Workflow instance
+
+    Returns:
+        Global session instance (AgentSession, TeamSession, or WorkflowSession)
+    """
+    # Try to load existing global session
+    global_session = executor.get_session(session_id=GLOBAL_AGNO_SESSION_ID)
+
+    if global_session is None:
+        # Create new global session with the fixed session ID based on object type
+        if isinstance(executor, Agent):
+            global_session = AgentSession(session_id=GLOBAL_AGNO_SESSION_ID)
+        elif isinstance(executor, Team):
+            global_session = TeamSession(session_id=GLOBAL_AGNO_SESSION_ID)
+        elif isinstance(executor, Workflow):
+            global_session = WorkflowSession(session_id=GLOBAL_AGNO_SESSION_ID)
+
+    return global_session
+
+
+def get_global_graph(executor: AgnoExecutor) -> GraphDatabase | None:
+    """Get the global graph from the global session.
+
+    Args:
+        executor: Agent, Team, or Workflow instance (needed to get global session)
+
+    Returns:
+        GraphDatabase if it exists, None otherwise
+    """
+    global_session = get_global_session(executor)
+
+    if not global_session.session_data or "global_graph" not in global_session.session_data:
+        return None
+
+    try:
+        return extract_graph(global_session.session_data, "global_graph")
+    except Exception:
+        return None
+
+
+def ensure_global_graph(executor: AgnoExecutor) -> GraphDatabase:
+    """Ensure global graph exists in global session, creating if needed.
+
+    Args:
+        executor: Agent, Team, or Workflow instance (needed to get global session)
+
+    Returns:
+        GraphDatabase instance (existing or newly created)
+    """
+    from .graph.database import GraphDatabase
+
+    graph = get_global_graph(executor)
+    if graph is not None:
+        return graph
+
+    # Create new graph
+    graph = GraphDatabase()
+
+    # Store in global session
+    global_session = get_global_session(executor)
+    if not global_session.session_data:
+        global_session.session_data = {}
+    global_session.session_data["global_graph"] = graph.to_dict()
+
+    return graph
+
+
+def save_global_graph(
+    executor: AgnoExecutor,
+    graph: GraphDatabase,
+) -> None:
+    """Save global graph back to global session.
+
+    Args:
+        executor: Agent, Team, or Workflow instance (needed to get and save global session)
+        graph: GraphDatabase instance to save
+    """
+    global_session = get_global_session(executor)
+
+    if not global_session.session_data:
+        global_session.session_data = {}
+    global_session.session_data["global_graph"] = graph.to_dict()
+
+    # Type casting is safe here because we created the session type to match the object type
+    if isinstance(executor, Agent):
+        executor.save_session(cast(AgentSession, global_session))
+    elif isinstance(executor, Team):
+        executor.save_session(cast(TeamSession, global_session))
+    elif isinstance(executor, Workflow):
+        executor.save_session(cast(WorkflowSession, global_session))
+
+
+def inject_context_to_run_input(
+    run_input: RunInput,
+    context_content: str,
+    message_role: str = "system",
+    prepend: bool = True,
+) -> None:
+    """Inject context content into the run_input.input_content.
+
+    This function handles different types of input_content and injects the context
+    in the appropriate way, similar to how the audio and graph hooks work.
+
+    Args:
+        run_input: The RunInput object to modify
+        context_content: The context content to inject
+        message_role: The role for the message if injecting as a Message (default: "system")
+        prepend: Whether to prepend (True) or append (False) the context (default: True)
+    """
+    input_content = run_input.input_content  # type: ignore
+
+    try:
+        if isinstance(input_content, str):
+            # String case
+            if input_content:
+                if prepend:
+                    run_input.input_content = f"{context_content}\n\n{input_content}"
+                else:
+                    run_input.input_content = f"{input_content}\n\n{context_content}"
+            else:
+                run_input.input_content = context_content
+
+        elif isinstance(input_content, list):
+            # List case - could be list of Messages, strings, or other content
+            if input_content and isinstance(input_content[0], Message):
+                # List of Messages
+                message_list: list[Message] = input_content  # type: ignore
+                if prepend:
+                    message_list.insert(0, Message(role=message_role, content=context_content))
+                else:
+                    message_list.append(Message(role=message_role, content=context_content))
+                run_input.input_content = message_list
+            else:
+                # List of strings or other content
+                if prepend:
+                    cast(list[Any], input_content).insert(0, context_content)
+                else:
+                    cast(list[Any], input_content).append(context_content)
+                run_input.input_content = input_content
+
+        elif isinstance(input_content, Message):
+            # Single Message case
+            if isinstance(input_content.content, str):
+                if prepend:
+                    # Wrap both in a list with context first
+                    run_input.input_content = [
+                        Message(role=message_role, content=context_content),
+                        input_content,
+                    ]
+                else:
+                    # Append context as a new message
+                    run_input.input_content = [
+                        input_content,
+                        Message(role=message_role, content=context_content),
+                    ]
+
+        elif input_content is None:
+            # None case - initialize with context
+            run_input.input_content = context_content
+
+        elif isinstance(input_content, dict):
+            # Dict case
+            logger.warning("Unsupported input_content type for context injection: dict. Skipping.")
+
+        else:
+            # Fallback - try to convert to string
+            if prepend:
+                run_input.input_content = f"{context_content}\n\n{str(input_content)}"
+            else:
+                run_input.input_content = f"{str(input_content)}\n\n{context_content}"
+
+    except Exception as e:
+        logger.warning(f"Could not inject context into input_content: {e}. Skipping.")
+
+
+def format_audio_transcript(audio: Audio) -> str:
+    """Format audio transcript into a standard string format.
+
+    Args:
+        audio: Agno Audio object with transcript
+
+    Returns:
+        Formatted transcript string
+    """
+    # Handle Path objects for filepath
+    filepath = None
+    if audio.filepath:
+        filepath = str(audio.filepath) if isinstance(audio.filepath, Path) else audio.filepath
+
+    source = audio.id or filepath or audio.url or "unknown source"
+    transcript = audio.transcript or ""
+
+    return f"Transcript from audio ({source}):\n{transcript}"
+
+
+def build_extraction_context(
+    run_input: RunInput | TeamRunInput | None,
+    run_output: RunOutput | TeamRunOutput | None,
+) -> str:
+    """Build the full context string for extraction from input and output.
+
+    This function creates a structured XML context from agent input and output,
+    useful for post-processing hooks that need to analyze the conversation.
+
+    Args:
+        run_input: The input to the agent
+        run_output: The output from the agent
+
+    Returns:
+        Structured context string with XML tags
+    """
+    # Get input and output content
+    input_content = run_input.input_content_string() if run_input else ""
+    response_content = ""
+    if run_output is not None:
+        response_content = cast(str, run_output.get_content_as_string())  # type: ignore
+
+    if not response_content:
+        return ""
+
+    # Build full context for extraction
+    if input_content:
+        return f"<user_message>\n{input_content}</user_message>\n\n<assistant_response>\n{response_content}</assistant_response>"
+    else:
+        return f"<assistant_response>\n{response_content}</assistant_response>"
+
+
+def build_agent_context(agent: Agent | Team) -> str:
+    """Build context string with agent's main instructions.
+
+    This function extracts the agent's purpose and instructions to provide
+    context for post-processing operations.
+
+    Args:
+        agent: The Agent or Team instance
+
+    Returns:
+        Context string with agent instructions in XML format
+    """
+    agent_context = ""
+    if isinstance(agent, Agent) and agent.instructions:  # type: ignore
+        agent_context = f"\n\n<agent_context>\nThe main agent's purpose and instructions:\n{agent.instructions}</agent_context>"  # type: ignore
+    elif isinstance(agent, Team) and agent.instructions:  # type: ignore
+        agent_context = f"\n\n<agent_context>\nThe main agent's purpose and instructions:\n{agent.instructions}</agent_context>"  # type: ignore
+    return agent_context
+
+
+def create_agent_with_instructions(
+    description: str,
+    instructions: list[str],
+    model: Any | None = None,
+    debug_mode: DebugMode = False,
+    output_schema: Any | None = None,
+) -> Agent:
+    """Create an agent with structured description and instructions.
+
+    This is a utility function for creating specialized agents with
+    consistent patterns, useful for hook implementations.
+
+    Args:
+        description: The agent's description/purpose
+        instructions: List of instruction strings
+        model: Optional model to use (inherits from creating agent if None)
+        debug_mode: Optional debug mode flag
+        output_schema: Optional output schema for structured output
+
+    Returns:
+        Configured Agent instance
+    """
+    agent_kwargs: dict[str, Any] = {
+        "description": description,
+        "instructions": instructions,
+        "debug_mode": debug_mode or False,
+    }
+
+    if model is not None:
+        agent_kwargs["model"] = model
+    if output_schema is not None:
+        agent_kwargs["output_schema"] = output_schema
+
+    return Agent(**agent_kwargs)
+
+
+async def execute_agent_async(agent: Agent, context: str) -> RunOutput:
+    """Execute an agent asynchronously with standardized error handling.
+
+    Args:
+        agent: The agent to execute
+        context: The context/input to provide to the agent
+
+    Returns:
+        The agent's output
+    """
+    return await agent.arun(context)  # type: ignore
+
+
+def execute_agent_sync(agent: Agent, context: str) -> RunOutput:
+    """Execute an agent synchronously with standardized error handling.
+
+    Args:
+        agent: The agent to execute
+        context: The context/input to provide to the agent
+
+    Returns:
+        The agent's output
+    """
+    return agent.run(context)  # type: ignore
+
+
+def save_data_to_json_file(
+    data: dict[str, Any],
+    file_path: str,
+    create_dirs: bool = True,
+    indent: int = 2,
+) -> None:
+    """Save data to a JSON file with proper directory creation.
+
+    This utility handles file path creation, directory creation, and JSON serialization
+    in a consistent way for hook implementations.
+
+    Args:
+        data: The data to save
+        file_path: The file path to save to
+        create_dirs: Whether to create parent directories
+        indent: JSON indentation level
+    """
+    try:
+        path = Path(file_path)
+        if create_dirs:
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=indent, ensure_ascii=False)
+
+        logger.debug(f"Data saved to: {file_path}")
+    except Exception as e:
+        logger.warning(f"Failed to save data to {file_path}: {e}")
+
+
+def read_binary_file_safely(file_path: str | Path) -> bytes | None:
+    """Read a binary file safely with proper error handling.
+
+    This utility handles file reading with consistent error handling
+    for hook implementations.
+
+    Args:
+        file_path: The path to the file to read
+
+    Returns:
+        File contents as bytes, or None if reading failed
+    """
+    try:
+        path = Path(file_path) if isinstance(file_path, str) else file_path
+
+        with open(path, "rb") as f:
+            return f.read()
+
+    except (FileNotFoundError, OSError, PermissionError) as e:
+        logger.warning(f"Failed to read file {file_path}: {e}")
+        return None

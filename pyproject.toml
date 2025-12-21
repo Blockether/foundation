@@ -9,15 +9,15 @@ license = { text = "MIT" }
 classifiers = []
 
 dependencies = [
-    "fastapi>=0.124.0",
-    "openai>=2.9.0",
+    "fastapi>=0.126.0",
+    "openai>=2.14.0",
     "pydantic>=2.12.5",
-    "tenacity>=8.2.0",
+    "tenacity>=9.1.2",
     "tantivy>=0.25.1",
-    "agno>=2.3.8",
+    "agno>=2.3.19",
     "faster-whisper>=1.2.1",
-    "sqlalchemy>=2.0.44",
-    "litellm>=1.80.9",
+    "sqlalchemy>=2.0.45",
+    "litellm>=1.80.10",
 ]
 
 [project.optional-dependencies]
@@ -25,18 +25,20 @@ dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "pytest-asyncio>=1.3.0",
-    "pytest-timeout>=2.3.1",
-    "pytest-xdist>=3.6.1",
-    "ruff>=0.14.8",
-    "pyright>=1.1.400",
+    "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.14.10",
+    "pyright>=1.1.407",
     "poethepoet>=0.38.0",
-    "langwatch-scenario>=0.7.14",
-    "tabulate>=0.9.0",
+    "prettytable>=3.17.0",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/blockether_foundation"]
@@ -52,7 +54,7 @@ addopts = [
     "-v",
     "--strict-markers",
     "-m",
-    "not integration",             # Skip integration tests by default
+    "not integration",
     "--cov=blockether_foundation",
     "--cov-report=term-missing",
     "--cov-report=html",
@@ -61,7 +63,7 @@ asyncio_mode = "auto"
 markers = [
     "unit: marks fast unit tests with mocked dependencies (default)",
     "integration: marks tests that make real LLM API calls (slow, skipped by default)",
-    "scenario: marks tests that use the scenario framework with agents",
+    "agno_eval: marks tests that use Agno evaluation frameworks (agent-as-judge or accuracy)",
     "performance_test: marks tests that measure performance and benchmarks",
     "slow: marks slow running tests",
     "asyncio: marks coroutine tests that need an event loop",
@@ -145,12 +147,15 @@ executionEnvironments = [
     { root = "tests", pythonVersion = "3.13", extraPaths = [
         "src",
     ] },
+    { root = "scripts", pythonVersion = "3.13", extraPaths = [
+        "scripts/impl",
+    ] },
 ]
 
 [tool.poe.tasks]
 test = "pytest tests/"
 test-unit = "pytest tests/unit/ -m unit --no-cov"
-test-integration = "pytest tests/integration/ -m integration --no-cov"
+test-integration = "pytest tests/integration/ -m 'integration or agno_eval' --no-cov"
 test-unit-cov = "pytest tests/unit/ -m unit"
 test-integration-cov = "pytest tests/integration/ -m integration"
 test-all = "pytest tests/ -m 'unit or integration'"
@@ -165,16 +170,11 @@ check = "bash scripts/enforce_quality.sh"
 check-all = ["format-check", "lint", "type-check", "test"]
 check-integration = ["format-check", "lint", "type-check", "test-integration"]
 
-[dependency-groups]
-dev = [
-    "langwatch-scenario>=0.7.14",
-    "poethepoet>=0.38.0",
-    "pyright>=1.1.407",
-    "pytest>=9.0.2",
-    "pytest-asyncio>=1.3.0",
-    "pytest-cov>=7.0.0",
-    "pytest-timeout>=2.4.0",
-    "pytest-xdist>=3.8.0",
-    "ruff>=0.14.8",
-    "tabulate>=0.9.0",
-]
+# Development environment variables
+[tool.dotenv]
+files = [".env", ".env.local"]
+
+# Add scripts/impl to PYTHONPATH for development
+[[tool.dotenv.overrides]]
+env = "development"
+PYTHONPATH = "scripts/impl:${PYTHONPATH}"

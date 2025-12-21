@@ -14,13 +14,6 @@
                 "Authorization": "Bearer ${Z_AI_API_KEY}"
             }
         },
-        "langwatch": {
-            "command": "npx",
-            "args": [
-                "-y",
-                "@langwatch/mcp-server"
-            ]
-        },
         "agno": {
             "type": "http",
             "url": "https://docs.agno.com/mcp"

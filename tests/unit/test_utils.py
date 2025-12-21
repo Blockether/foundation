@@ -101,7 +101,7 @@ class TestNoneInvariant:
     def test_none_invariant_with_complex_condition(self) -> None:
         """Test none_invariant with condition that performs computation."""
 
-        def compute_value() -> int:
+        def compute_value() -> int | None:
             data = TEST_LIST_DATA
             return sum(data) if data else None
 
@@ -113,21 +113,20 @@ class TestNoneInvariant:
         """Test none_invariant with condition callable that takes arguments."""
 
         def get_value_or_none(data: list[str], index: int) -> str | None:
-            try:
-                return data[index]
-            except IndexError:
-                return None
+            return data[index] if 0 <= index < len(data) else None
 
         # Success case
         result = none_invariant(
-            lambda: get_value_or_none(TEST_INDEXED_LIST, SUCCESS_INDEX), "Value should exist at index 1"
+            lambda: get_value_or_none(TEST_INDEXED_LIST, SUCCESS_INDEX),
+            "Value should exist at index 1",
         )
         assert result == TEST_INDEX_VALUE
 
         # Failure case
         with pytest.raises(AssertionError):
             none_invariant(
-                lambda: get_value_or_none(TEST_INDEXED_LIST, FAILURE_INDEX), "Value should not be None"
+                lambda: get_value_or_none(TEST_INDEXED_LIST, FAILURE_INDEX),
+                "Value should not be None",
             )
 
     @pytest.mark.unit
@@ -212,11 +211,25 @@ class TestNoneInvariant:
     def test_none_invariant_with_exception_in_condition(self) -> None:
         """Test none_invariant propagates exceptions from condition."""
 
-        def failing_condition() -> None:
+        def value_error_condition() -> None:
             raise ValueError("Condition execution failed")
 
-        with pytest.raises(ValueError, match="Condition execution failed"):
-            none_invariant(failing_condition, "This should not be reached")
+        def runtime_error_condition() -> None:
+            raise RuntimeError("Runtime error occurred")
+
+        # Test that ValueError is properly propagated
+        with pytest.raises(ValueError, match="Condition execution failed") as exc_info:
+            none_invariant(value_error_condition, "This should not be reached")
+
+        # Verify the exception message
+        assert "Condition execution failed" in str(exc_info.value)
+
+        # Test that RuntimeError is properly propagated
+        with pytest.raises(RuntimeError, match="Runtime error occurred") as exc_info:
+            none_invariant(runtime_error_condition, "Should raise runtime error")
+
+        # Verify the runtime error message
+        assert "Runtime error occurred" in str(exc_info.value)
 
     @pytest.mark.unit
     def test_none_invariant_multiple_assertions_in_same_test(self) -> None:

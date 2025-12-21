@@ -146,8 +146,6 @@ class GraphIndex:
         Returns:
             Restored GraphIndex.
         """
-        from datetime import date
-
         index = cls()
 
         # Restore entity and relationship maps

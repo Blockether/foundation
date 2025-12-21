@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import time
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any, TypeVar, cast, override
 
 import tantivy
@@ -17,8 +19,13 @@ from blockether_foundation.graph.models import (
     Entity,
     EntityType,
     LLMEntityQuery,
+    LLMGraphAddEntity,
+    LLMGraphAddRelationship,
+    LLMGraphDeleteEntity,
+    LLMGraphDeleteRelationship,
     LLMGraphOperations,
     LLMGraphQueryOperations,
+    LLMGraphUpdateEntity,
     LLMRelationshipQuery,
     Relationship,
     RelationType,
@@ -81,8 +88,8 @@ class GraphDatabase:
     def __init__(self) -> None:
         """Initialize graph database."""
         self._index: GraphIndex = GraphIndex()
-        self._tantivy_index: tantivy.Index | None = None  # Lazy-loaded Tantivy index
-        self._tantivy_searcher: tantivy.Searcher | None = None  # Cache searcher
+        self._tantivy_index: Any | None = None  # Lazy-loaded Tantivy index (optional)
+        self._tantivy_searcher: Any | None = None  # Cache searcher (optional)
 
     @property
     def index(self) -> GraphIndex:
@@ -181,11 +188,12 @@ class GraphDatabase:
         # Incremental Tantivy update - remove single entity from search index
         self._incremental_remove_entity_from_tantivy(entity_id)
 
-    def get_entity(self, entity_id: str) -> Entity | None:
+    def get_entity(self, entity_id: str, include_relationships: bool = False) -> Entity | None:
         """Get entity by ID.
 
         Args:
             entity_id: Entity ID.
+            include_relationships: Whether to attach relationships to the entity
 
         Returns:
             Entity if found, None otherwise.
@@ -350,26 +358,50 @@ class GraphDatabase:
 
         Raises:
             ValueError: If entities referenced in operations don't exist.
+            TypeError: If operations is not an LLMGraphOperations instance.
         """
-        # Validate operations type
+        # Type validation
         if not isinstance(operations, LLMGraphOperations):
             raise TypeError(f"Expected LLMGraphOperations, got {type(operations).__name__}")
 
         # Trigger normalization by accessing ops (handles duplicate edges).
-        _ = operations.ops
+        operations_list: list[
+            LLMGraphAddEntity
+            | LLMGraphUpdateEntity
+            | LLMGraphDeleteEntity
+            | LLMGraphAddRelationship
+            | LLMGraphDeleteRelationship
+        ] = operations.ops
+
+        # Separate operations by type for proper execution order
+        delete_relationships: list[LLMGraphDeleteRelationship] = []
+        delete_entities: list[LLMGraphDeleteEntity] = []
+        add_entities: list[LLMGraphAddEntity] = []
+        update_entities: list[LLMGraphUpdateEntity] = []
+        add_relationships: list[LLMGraphAddRelationship] = []
+
+        # Sort operations by type using isinstance checks
+        for op in operations_list:
+            if isinstance(op, LLMGraphDeleteRelationship):
+                delete_relationships.append(op)
+            elif isinstance(op, LLMGraphDeleteEntity):
+                delete_entities.append(op)
+            elif isinstance(op, LLMGraphAddEntity):
+                add_entities.append(op)
+            elif isinstance(op, LLMGraphUpdateEntity):
+                update_entities.append(op)
+            elif isinstance(op, LLMGraphAddRelationship):
+                add_relationships.append(op)
 
         # Step 1: Delete relationships first (edges before nodes)
-        delete_relationships = operations.delete_relationship_ops
         for delete_op in delete_relationships:
             self.delete_relationship(delete_op.id)
 
         # Step 2: Delete entities
-        delete_entities = operations.delete_entity_ops
         for delete_entity_op in delete_entities:
             self.delete_entity(delete_entity_op.entity_id)
 
         # Step 3: Add new entities
-        add_entities = operations.add_entity_ops
         for add_entity_op in add_entities:
             entity = Entity(
                 name=add_entity_op.name,
@@ -379,7 +411,6 @@ class GraphDatabase:
             self.add_entity(entity)
 
         # Step 4: Update existing entities
-        update_entities = operations.update_entity_ops
         for update_entity_op in update_entities:
             existing_entity = self.get_entity(update_entity_op.id)
             if not existing_entity:
@@ -395,7 +426,6 @@ class GraphDatabase:
             self.update_entity(updated_entity)
 
         # Step 5: Add relationships (after entities exist)
-        add_relationships = operations.add_relationship_ops
         for add_relationship_op in add_relationships:
             # Look up source and target entities by name
             source_entity = self.get_entity_by_name(add_relationship_op.source_name)
@@ -609,7 +639,7 @@ class GraphDatabase:
             self._initialize_tantivy_index()
 
         if self._tantivy_index is None:
-            return []  # No entities or tantivy not available
+            return []  # No index available (e.g., Tantivy missing or no entities)
 
         # Create fresh searcher for each search
         searcher = self._tantivy_index.searcher()
@@ -754,9 +784,6 @@ class GraphDatabase:
         if relationship_query.target_entity_name:
             query.to_entity(entity_name=relationship_query.target_entity_name)
 
-        # Always include entities
-        query.with_entities()
-
         # Common options
         query.limit(relationship_query.limit)
         query.order_by(relationship_query.order_by, ascending=relationship_query.order_ascending)
@@ -782,9 +809,10 @@ class GraphDatabase:
 
         # Create index
         self._tantivy_index = tantivy.Index(schema)
+        index = cast(Any, self._tantivy_index)
 
         # Add all entities to the index
-        writer = self._tantivy_index.writer()
+        writer = index.writer()
         for entity in entities:
             writer.add_document(
                 tantivy.Document(
@@ -798,8 +826,8 @@ class GraphDatabase:
             )
         writer.commit()
         writer.wait_merging_threads()
-        self._tantivy_index.reload()
-        self._tantivy_searcher = self._tantivy_index.searcher()
+        index.reload()
+        self._tantivy_searcher = index.searcher()
 
     def _incremental_add_entities_to_tantivy(self, entities: list[Entity]) -> None:
         """Add multiple entities to Tantivy index incrementally in one batch."""
@@ -808,8 +836,11 @@ class GraphDatabase:
             self._initialize_tantivy_index()
             return  # Entities will be added in full rebuild
 
+        assert self._tantivy_index is not None
+        index = cast(Any, self._tantivy_index)
+
         # Add all documents in one batch for efficiency
-        writer = self._tantivy_index.writer()
+        writer = index.writer()
         for entity in entities:
             writer.add_document(
                 tantivy.Document(
@@ -823,8 +854,8 @@ class GraphDatabase:
         # Single commit for all entities
         writer.commit()
         writer.wait_merging_threads()
-        self._tantivy_index.reload()
-        self._tantivy_searcher = self._tantivy_index.searcher()
+        index.reload()
+        self._tantivy_searcher = index.searcher()
 
     def _incremental_update_entity_in_tantivy(self, entity_id: str, entity: Entity) -> None:
         """Update single entity in Tantivy index incrementally."""
@@ -833,8 +864,11 @@ class GraphDatabase:
             self._initialize_tantivy_index()
             return
 
+        assert self._tantivy_index is not None
+        index = cast(Any, self._tantivy_index)
+
         # Delete old document and add new one
-        writer = self._tantivy_index.writer()
+        writer = index.writer()
 
         # Delete by term query on ID field
         delete_query = self._tantivy_index.parse_query(f'"{entity_id}"', ["id"])
@@ -852,8 +886,8 @@ class GraphDatabase:
 
         writer.commit()
         writer.wait_merging_threads()
-        self._tantivy_index.reload()
-        self._tantivy_searcher = self._tantivy_index.searcher()
+        index.reload()
+        self._tantivy_searcher = index.searcher()
 
     def _incremental_remove_entity_from_tantivy(self, entity_id: str) -> None:
         """Remove single entity from Tantivy index incrementally."""
@@ -861,9 +895,12 @@ class GraphDatabase:
         if self._tantivy_index is None:
             return
 
+        assert self._tantivy_index is not None
+        index = cast(Any, self._tantivy_index)
+
         # Delete document by ID
-        writer = self._tantivy_index.writer()
-        delete_query = self._tantivy_index.parse_query(f'"{entity_id}"', ["id"])
+        writer = index.writer()
+        delete_query = index.parse_query(f'"{entity_id}"', ["id"])
         writer.delete_documents_by_query(delete_query)
         writer.commit()
         writer.wait_merging_threads()
@@ -933,6 +970,41 @@ class GraphDatabase:
 
         return db
 
+    def save_to_file(self, file_path: str | Path) -> None:
+        """Save graph database to JSON file.
+
+        Args:
+            file_path: Path to the file where the graph should be saved.
+        """
+        path = Path(file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        with path.open("w") as f:
+            json.dump(self.to_dict(), f, indent=2, default=str)
+
+    @classmethod
+    def load_from_file(cls, file_path: str | Path) -> GraphDatabase:
+        """Load graph database from JSON file.
+
+        Args:
+            file_path: Path to the file to load the graph from.
+
+        Returns:
+            GraphDatabase instance loaded from file.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+        """
+        path = Path(file_path)
+
+        if not path.exists():
+            raise FileNotFoundError(f"Graph file not found: {file_path}")
+
+        with path.open("r") as f:
+            data = json.load(f)
+
+        return cls.from_dict(data)
+
     @property
     def entity_count(self) -> int:
         """Get total number of entities."""
@@ -953,8 +1025,177 @@ class GraphDatabase:
             self._tantivy_index = None
             self._tantivy_searcher = None
 
+    def get_entity_degree(self, entity_id: str) -> int:
+        """Get the degree (number of connections) for an entity.
 
-# New unified query classes
+        Args:
+            entity_id: Entity ID
+
+        Returns:
+            Number of relationships (both incoming and outgoing)
+        """
+        if entity_id not in self._index.entity_by_id:
+            return 0
+
+        outgoing_count = len(self._index.outgoing_edges.get(entity_id, set()))
+        incoming_count = len(self._index.incoming_edges.get(entity_id, set()))
+        return outgoing_count + incoming_count
+
+    def get_entity_relationships(self, entity_id: str) -> list[Relationship]:
+        """Get all relationships for an entity.
+
+        Args:
+            entity_id: Entity ID
+
+        Returns:
+            List of relationships for the entity
+        """
+        relationships: list[Relationship] = []
+
+        # Get outgoing relationships
+        for rel_id in self._index.outgoing_edges.get(entity_id, set()):
+            if rel_id in self._index.relationship_by_id:
+                relationships.append(self._index.relationship_by_id[rel_id])
+
+        # Get incoming relationships
+        for rel_id in self._index.incoming_edges.get(entity_id, set()):
+            if rel_id in self._index.relationship_by_id:
+                relationships.append(self._index.relationship_by_id[rel_id])
+
+        return relationships
+
+    def get_entity_count(self) -> int:
+        """Get the total number of entities in the graph.
+
+        Returns:
+            Number of entities in the graph
+        """
+        return len(self._index.entity_by_id)
+
+    def get_relationship_count(self) -> int:
+        """Get the total number of relationships in the graph.
+
+        Returns:
+            Number of relationships in the graph
+        """
+        return len(self._index.relationship_by_id)
+
+    def get_most_connected_entities(self, limit: int = 20) -> list[tuple[Entity, int]]:
+        """Get the most connected entities by degree.
+
+        Args:
+            limit: Maximum number of entities to return
+
+        Returns:
+            List of (Entity, degree) tuples sorted by degree descending
+        """
+        entity_degrees: list[tuple[Entity, int]] = []
+        for entity_id, entity in self._index.entity_by_id.items():
+            degree = self.get_entity_degree(entity_id)
+            entity_degrees.append((entity, degree))
+
+        # Sort by degree descending
+        entity_degrees.sort(key=lambda x: cast(Any, x)[1], reverse=True)
+        return entity_degrees[:limit]
+
+    def get_entities_with_relationships_for_context(
+        self, limit: int = 20, max_rels_per_entity: int = 10
+    ) -> list[str]:
+        """Get formatted entities with their relationships for LLM context.
+
+        This method formats entities and their relationships in a way that's
+        suitable for including in prompts to language models for knowledge
+        graph extraction and querying.
+
+        Args:
+            limit: Maximum number of entities to return
+            max_rels_per_entity: Maximum relationships to show per entity
+
+        Returns:
+            List of formatted entity strings with their relationships
+        """
+        most_connected = self.get_most_connected_entities(limit)
+        entity_list: list[str] = []
+
+        for entity, degree in most_connected:
+            # Get relationships for this entity using the public method
+            relationships = self.get_entity_relationships(entity.id)
+
+            # Format relationships (limit to max_rels_per_entity total)
+            rel_descriptions: list[str] = []
+            rels_to_show = min(len(relationships), max_rels_per_entity)
+
+            # Sort relationships (outgoing first, then incoming)
+            outgoing_first = sorted(
+                relationships,
+                key=lambda r: (
+                    0 if r.source == entity.id else 1,  # Outgoing first
+                    r.type,  # Then by type for consistency
+                ),
+            )[:rels_to_show]
+
+            for rel in outgoing_first:
+                if rel.source == entity.id:
+                    # Outgoing relationship - show target
+                    target_entity = self._index.entity_by_id.get(rel.target)
+                    if target_entity:
+                        rel_descriptions.append(f"{rel.type}: {target_entity.name}")
+                else:
+                    # Incoming relationship - show source
+                    source_entity = self._index.entity_by_id.get(rel.source)
+                    if source_entity:
+                        rel_descriptions.append(f"{rel.type}: {source_entity.name}")
+
+            # Format entity info
+            rels_str = (
+                f" [{', '.join(cast(list[str], rel_descriptions))}]" if rel_descriptions else ""
+            )
+            entity_list.append(f"• {entity.name} ({entity.type}) - {degree} connections{rels_str}")
+
+        return entity_list
+
+    def get_graph_density_metrics(self) -> dict[str, Any]:
+        """Calculate graph density and connection metrics.
+
+        Returns:
+            Dictionary with density metrics:
+            - total_entities: Number of entities
+            - total_relationships: Number of relationships
+            - average_degree: Average connections per entity
+            - max_degree: Maximum connections for any entity
+            - density: Ratio of actual to possible connections
+        """
+        num_entities = len(self._index.entity_by_id)
+        num_relationships = len(self._index.relationship_by_id)
+
+        if num_entities == 0:
+            return {
+                "total_entities": 0,
+                "total_relationships": 0,
+                "average_degree": 0.0,
+                "max_degree": 0,
+                "density": 0.0,
+            }
+
+        # Calculate degrees
+        degrees = [self.get_entity_degree(eid) for eid in self._index.entity_by_id.keys()]
+        avg_degree = sum(degrees) / len(degrees)
+        max_degree = max(degrees) if degrees else 0
+
+        # Density = (2 * edges) / (nodes * (nodes - 1)) for undirected graph
+        density = (
+            (2 * num_relationships) / (num_entities * (num_entities - 1))
+            if num_entities > 1
+            else 0.0
+        )
+
+        return {
+            "total_entities": num_entities,
+            "total_relationships": num_relationships,
+            "average_degree": avg_degree,
+            "max_degree": max_degree,
+            "density": density,
+        }
 
 
 class Filter[T](ABC):
@@ -1339,7 +1580,28 @@ class EntityQuery:
             def sort_key(entity: Entity) -> str:
                 if self.sort_field is None:
                     return ""
-                value = getattr(entity, self.sort_field, "")
+
+                # Access known attributes safely
+                if self.sort_field == "name":
+                    value = entity.name
+                elif self.sort_field == "type":
+                    value = entity.type
+                elif self.sort_field == "content":
+                    value = entity.content
+                elif self.sort_field == "id":
+                    value = entity.id
+                elif self.sort_field == "created_at":
+                    value = entity.created_at
+                elif self.sort_field == "updated_at":
+                    value = entity.updated_at
+                else:
+                    # For any other field, try to get it safely
+                    if isinstance(entity, Entity):
+                        # Entity doesn't have dynamic attributes, return empty string for unknown fields
+                        value = ""
+                    else:
+                        value = ""
+
                 return str(value) if value is not None else ""
 
             results.sort(key=sort_key, reverse=reverse)
@@ -1453,12 +1715,6 @@ class RelationshipQuery:
         self.filters.append(filter_obj)
         return self
 
-    def with_entities(self) -> RelationshipQuery:
-        """Include entities in the query results."""
-        # This method is kept for backward compatibility but doesn't need to do anything
-        # since execute() always returns (source, target, relationship) tuples
-        return self
-
     def order_by(self, field: str, ascending: bool = True) -> RelationshipQuery:
         """Set sort order for results."""
         self.sort_field = field
@@ -1539,7 +1795,28 @@ class RelationshipQuery:
             def sort_key(relationship: Relationship) -> str:
                 if self.sort_field is None:
                     return ""
-                value = getattr(relationship, self.sort_field, "")
+
+                # Access known attributes safely
+                if self.sort_field == "source":
+                    value = relationship.source
+                elif self.sort_field == "target":
+                    value = relationship.target
+                elif self.sort_field == "type":
+                    value = relationship.type
+                elif self.sort_field == "id":
+                    value = relationship.id
+                elif self.sort_field == "created_at":
+                    value = relationship.created_at
+                elif self.sort_field == "updated_at":
+                    value = relationship.updated_at
+                else:
+                    # For any other field, try to get it safely
+                    if isinstance(relationship, Relationship):
+                        # Relationship doesn't have dynamic attributes, return empty string for unknown fields
+                        value = ""
+                    else:
+                        value = ""
+
                 return str(value) if value is not None else ""
 
             results.sort(key=sort_key, reverse=reverse)

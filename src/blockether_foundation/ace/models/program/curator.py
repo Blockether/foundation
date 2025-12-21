@@ -16,5 +16,5 @@ class CuratorOutput(BaseModel):
 
     reasoning: str = Field(description="Analysis of what to add to playbook.")
     operations: list[CuratorOperation] = Field(
-        default_factory=list, description="List of operations to perform."
+        default_factory=lambda: [], description="List of operations to perform."
     )

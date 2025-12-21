@@ -1,0 +1,186 @@
+"""Test the audio transcription save functionality."""
+
+import os
+import tempfile
+from datetime import datetime, UTC
+
+import pytest
+
+from src.blockether_foundation.agents.hooks.audio import _save_transcription_to_file
+from src.blockether_foundation.audio.transcription import (
+    TranscriptionResult,
+    TranscriptionSegment,
+    Word,
+)
+
+
+class TestAudioTranscriptionSave:
+    """Test the save transcription functionality."""
+
+    @pytest.fixture
+    def sample_transcription_result(self):
+        """Create a sample transcription result for testing."""
+        words = [
+            Word(word="Hello", start=0.0, end=0.5, score=0.98),
+            Word(word="world", start=0.6, end=1.0, score=0.95),
+            Word(word="test", start=1.2, end=1.6, score=0.99),
+        ]
+
+        segment = TranscriptionSegment(
+            start=0.0,
+            end=2.0,
+            text="Hello world test",
+            words=words,
+            speaker=None
+        )
+
+        return TranscriptionResult(
+            segments=[segment],
+            language="en",
+            language_probability=0.97,
+            created_at=datetime(2025, 1, 15, 10, 30, tzinfo=UTC)
+        )
+
+    def test_save_transcription_basic(self, sample_transcription_result):
+        """Test basic save functionality."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Save transcript
+            saved_path = _save_transcription_to_file(
+                transcript=sample_transcription_result,
+                save_dir=temp_dir,
+            )
+
+            # Verify file was created
+            assert saved_path is not None
+            assert os.path.exists(saved_path)
+
+            # Read and verify content
+            with open(saved_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Check basic structure
+            assert "=== AUDIO TRANSCRIPTION ===" in content
+            assert "=== RAW TRANSCRIPTION ===" in content
+            assert "Language: en (confidence: 0.970)" in content
+            assert "Total Duration: 2.000s" in content
+            assert "Word Count: 3" in content
+            assert "Segment Count: 1" in content
+
+            # Check segment content
+            assert "[Segment 1] 0.000s - 2.000s:" in content
+            assert "Hello world test" in content
+
+            # Check word timestamps
+            assert "Word timestamps:" in content
+            assert "Hello (0.000s-0.500s)" in content
+            assert "world (0.600s-1.000s)" in content
+            assert "test (1.200s-1.600s)" in content
+
+    def test_save_transcription_with_source(self, sample_transcription_result):
+        """Test save functionality with audio source."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Save with filepath source
+            saved_path = _save_transcription_to_file(
+                transcript=sample_transcription_result,
+                save_dir=temp_dir,
+                audio_source="/path/to/audio.mp3",
+            )
+
+            # Verify filename includes source name
+            assert os.path.exists(saved_path)
+            filename = os.path.basename(saved_path)
+            assert "transcription_audio_" in filename
+            assert datetime.now().strftime("%Y%m%d") in filename  # Contains current date
+
+            # Check content includes source
+            with open(saved_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            assert "Source: /path/to/audio.mp3" in content
+
+    def test_save_transcription_with_url_source(self, sample_transcription_result):
+        """Test save functionality with URL source."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Save with URL source
+            url = "https://example.com/audio.mp3"
+            saved_path = _save_transcription_to_file(
+                transcript=sample_transcription_result,
+                save_dir=temp_dir,
+                audio_source=url,
+            )
+
+            # Verify file was created
+            assert saved_path is not None
+            assert os.path.exists(saved_path)
+
+            # Check content includes source
+            with open(saved_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            assert f"Source: {url}" in content
+
+    def test_save_transcription_with_file_metadata(self, sample_transcription_result):
+        """Test save functionality with file metadata."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create file metadata
+            file_metadata = {
+                "filepath": "/full/path/to/audio.mp3",
+                "filename": "audio.mp3",
+                "size": 1048576,  # 1 MB
+                "modified_date": "2025-01-14T15:30:00",
+                "created_date": "2025-01-14T15:25:00",
+            }
+
+            # Save with metadata
+            saved_path = _save_transcription_to_file(
+                transcript=sample_transcription_result,
+                save_dir=temp_dir,
+                audio_source="audio.mp3",
+                file_metadata=file_metadata,
+            )
+
+            # Verify file was created
+            assert saved_path is not None
+            assert os.path.exists(saved_path)
+
+            # Check content includes metadata
+            with open(saved_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            assert "File Path: /full/path/to/audio.mp3" in content
+            assert "File Name: audio.mp3" in content
+            assert "File Size: 1.00 MB" in content
+            assert "File Modified: 2025-01-14T15:30:00" in content
+
+    def test_save_transcription_creates_directory(self, sample_transcription_result):
+        """Test that save directory is created if it doesn't exist."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create nested path that doesn't exist
+            save_dir = os.path.join(temp_dir, "transcriptions", "2025")
+            assert not os.path.exists(save_dir)
+
+            # Save transcript
+            saved_path = _save_transcription_to_file(
+                transcript=sample_transcription_result,
+                save_dir=save_dir,
+            )
+
+            # Verify directory was created
+            assert os.path.exists(save_dir)
+            assert os.path.exists(saved_path)
+
+    def test_save_transcription_handles_error(self):
+        """Test error handling when save fails."""
+        # Use invalid path that cannot be created
+        invalid_path = "/root/invalid/path/that/cannot/be/created"
+
+        # Try to save (should handle error gracefully)
+        saved_path = _save_transcription_to_file(
+            transcript=TranscriptionResult(
+                segments=[],
+                language="en",
+                language_probability=0.97
+            ),
+            save_dir=invalid_path,
+        )
+
+        # Should return None on error
+        assert saved_path is None
