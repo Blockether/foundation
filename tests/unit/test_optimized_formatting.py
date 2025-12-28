@@ -9,6 +9,11 @@ from src.blockether_foundation.graph.formatting import (
 )
 from src.blockether_foundation.graph.models import Entity, Relationship
 
+LONG_CONTENT_LENGTH = 100
+MAX_TRUNCATED_LENGTH = 53
+MAX_ELEMENT_COUNT = 20
+MAX_RESULTS_PER_QUERY_TEST = 3
+
 
 class TestOptimizedFormatting:
     """Simple tests for NEW optimized XML formatting functionality."""
@@ -96,7 +101,7 @@ class TestOptimizedFormatting:
         content_elem = root.find(".//content")
 
         # Should be truncated with "..."
-        assert len(content_elem.text) <= 53  # 50 + "..."
+        assert len(content_elem.text) <= MAX_TRUNCATED_LENGTH
         assert content_elem.text.endswith("...")
 
         # Test without truncation
@@ -105,7 +110,7 @@ class TestOptimizedFormatting:
         content_no_trunc = root_no_trunc.find(".//content")
 
         # Should not be truncated
-        assert len(content_no_trunc.text) == 100
+        assert len(content_no_trunc.text) == LONG_CONTENT_LENGTH
         assert not content_no_trunc.text.endswith("...")
 
     def test_special_characters_handled_correctly(self):
@@ -114,7 +119,7 @@ class TestOptimizedFormatting:
             id="special",
             name="Entity <with> & 'quotes'",
             type="concept",
-            content="Content with <tags>"
+            content="Content with <tags>",
         )
 
         mock_query = Mock()
@@ -206,7 +211,7 @@ class TestOptimizedFormatting:
             id="unicode",
             name="Unicode Tést ñáéíóú 🎉",
             type="concept",
-            content="Unicode content: 中文"
+            content="Unicode content: 中文",
         )
 
         mock_query = Mock()
@@ -280,7 +285,7 @@ class TestOptimizedFormatting:
         element_count = len(elements)
 
         # Should have minimal elements due to optimization
-        assert element_count <= 20
+        assert element_count <= MAX_ELEMENT_COUNT
 
         # Verify no verbose elements
         xml_text = result
@@ -306,7 +311,7 @@ class TestOptimizedFormatting:
 
         root = ET.fromstring(result)
         entity_elems = root.findall(".//entity")
-        assert len(entity_elems) == 3
+        assert len(entity_elems) == MAX_RESULTS_PER_QUERY_TEST
 
         # Test with zero limit
         result_zero = format_graph_query_results([mock_query], max_results_per_query=0)

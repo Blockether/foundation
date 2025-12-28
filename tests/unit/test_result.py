@@ -16,7 +16,6 @@ class TestResultError:
         """Test ResultError constructor and message handling."""
         error = ResultError("Test error message")
         assert "Test error message" in str(error)
-        assert isinstance(error, FoundationBaseError)
 
 
 class TestResult:
@@ -45,21 +44,18 @@ class TestResult:
         """Test __post_init__ raises error for Ok result with error."""
         with pytest.raises(ResultError, match="Ok result cannot have an error"):
             Result(_ok=42, _error=ResultError("error"), _is_ok=True)
-        assert True  # Assert that validation properly raised
 
     @pytest.mark.unit
     def test_post_init_validation_err_with_value(self) -> None:
         """Test __post_init__ raises error for Err result with value."""
         with pytest.raises(ResultError, match="Err result cannot have an ok value"):
             Result(_ok=42, _error=None, _is_ok=False)
-        assert True  # Assert that validation properly raised
 
     @pytest.mark.unit
     def test_post_init_validation_err_without_error(self) -> None:
         """Test __post_init__ raises error for Err result without error."""
         with pytest.raises(ResultError, match="Err result must have an error"):
             Result(_ok=None, _error=None, _is_ok=False)
-        assert True  # Assert that validation properly raised
 
     @pytest.mark.unit
     def test_is_ok_method(self) -> None:
@@ -68,8 +64,8 @@ class TestResult:
         ok_result: Result[int, ResultError] = Result[int, ResultError].Ok(test_value)
         err_result: Result[int, ResultError] = Result[int, ResultError].Err(ResultError("error"))
 
-        assert ok_result.is_ok() is True
-        assert err_result.is_ok() is False
+        assert ok_result.is_ok()
+        assert not err_result.is_ok()
 
     @pytest.mark.unit
     def test_is_err_method(self) -> None:
@@ -78,8 +74,8 @@ class TestResult:
         ok_result: Result[int, ResultError] = Result[int, ResultError].Ok(test_value)
         err_result: Result[int, ResultError] = Result[int, ResultError].Err(ResultError("error"))
 
-        assert ok_result.is_err() is False
-        assert err_result.is_err() is True
+        assert not ok_result.is_err()
+        assert err_result.is_err()
 
     @pytest.mark.unit
     def test_unwrap_success(self) -> None:
@@ -94,9 +90,8 @@ class TestResult:
         error = ResultError("test error")
         result: Result[int, ResultError] = Result[int, ResultError].Err(error)
 
-        with pytest.raises(ResultError):
+        with pytest.raises(ResultError, match="test error"):
             result.unwrap()
-        assert True  # Assert that unwrap properly raised
 
     @pytest.mark.unit
     def test_unwrap_err_success(self) -> None:
@@ -113,7 +108,6 @@ class TestResult:
 
         with pytest.raises(ResultError, match="Called unwrap_err\\(\\) on an Ok value: 42"):
             result.unwrap_err()
-        assert True  # Assert that unwrap_err properly raised
 
     @pytest.mark.unit
     def test_unwrap_or_on_ok(self) -> None:
@@ -178,9 +172,8 @@ class TestResult:
         error = ResultError("original error")
         result: Result[int, ResultError] = Result[int, ResultError].Err(error)
 
-        with pytest.raises(ResultError):
+        with pytest.raises(ResultError, match="Custom message"):
             result.expect("Custom message")
-        assert True  # Assert that expect properly raised
 
     @pytest.mark.unit
     def test_expect_includes_original_error(self) -> None:
@@ -189,7 +182,6 @@ class TestResult:
         result: Result[int, ResultError] = Result[int, ResultError].Err(error)
         with pytest.raises(ResultError, match="bad state"):
             result.expect("Should not happen")
-        assert True  # Assert that expect properly raised with original error
 
     @pytest.mark.unit
     def test_map_on_ok(self) -> None:
@@ -341,8 +333,7 @@ class TestResult:
         """Test string representation of Err result."""
         error = ResultError("test error")
         result: Result[int, ResultError] = Result[int, ResultError].Err(error)
-        assert "Result.Err(" in repr(result)
-        assert "test error" in repr(result)
+        assert repr(result) == "Result.Err(ResultError('test error'))"
 
     @pytest.mark.unit
     def test_complex_chaining_success(self) -> None:

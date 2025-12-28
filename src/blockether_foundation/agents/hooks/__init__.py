@@ -1,12 +1,22 @@
 """Hooks for Agno agents."""
 
-from .audio import AudioHooksConfig, AudioHookType
-from .graph import AgnoPostHook, AgnoPreHook, GraphHooksConfig
+from ...utils import AgnoPostHook, AgnoPreHook
+from .consensus import (
+    ConsensusHooksConfig,
+    ConsensusResult,
+    JudgeCriteria,
+    ModelConfig,
+)
+from .graph import GraphHooksConfig
+from .transcription import TranscriptionHooksConfig
 
 __all__ = [
     "GraphHooksConfig",
     "AgnoPreHook",
     "AgnoPostHook",
-    "AudioHooksConfig",
-    "AudioHookType",
+    "TranscriptionHooksConfig",
+    "ConsensusHooksConfig",
+    "ConsensusResult",
+    "JudgeCriteria",
+    "ModelConfig",
 ]

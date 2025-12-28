@@ -1,13 +1,12 @@
 """Unit tests for audio transcription hook with XML formatting."""
 
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-import pytest
 
+import pytest
 from agno.agent import Agent
 from agno.media import Audio
 from agno.run.agent import RunInput
-
 from blockether_foundation.agents.hooks.audio import AudioHooksConfig
 from blockether_foundation.audio.transcription import (
     TranscriptionResult,
@@ -207,7 +206,7 @@ class TestAudioHookXMLFormatting:
                 start=float(i),
                 end=float(i + 1),
                 text=f"Segment {i + 1}",
-                words=[Word(word=f"Segment", start=float(i), end=float(i + 0.5), score=0.95)],
+                words=[Word(word="Segment", start=float(i), end=float(i + 0.5), score=0.95)],
                 speaker=f"Speaker {chr(65 + (i % 3))}"  # Rotate between A, B, C
             ))
 

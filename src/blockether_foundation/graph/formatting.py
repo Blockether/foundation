@@ -244,3 +244,76 @@ def format_existing_entities_for_context(
 
     xml_parts.append("</existing_entities>")
     return "\n".join(xml_parts)
+
+
+def format_entities_with_relationships_for_prompt(
+    entity_ids: set[str],
+    graph: GraphDatabase,
+) -> str:
+    """Format entities with their relationships for the LLM prompt in XML format.
+
+    This function formats specific entities (by ID) with all their relationships
+    for inclusion in LLM prompts. Unlike format_existing_entities_for_context,
+    this doesn't limit the number of entities and uses the exact entity IDs provided.
+
+    Args:
+        entity_ids: Set of entity IDs to format
+        graph: GraphDatabase instance to query
+
+    Returns:
+        Formatted XML string with entities and their relationships
+    """
+    if not entity_ids:
+        return '<already_retrieved_entities count="0"></already_retrieved_entities>'
+
+    xml_parts: list[str] = []
+    xml_parts.append(f'<already_retrieved_entities count="{len(entity_ids)}">')
+
+    # Get the index once for efficiency
+    idx = graph.index
+
+    for entity_id in sorted(entity_ids):
+        entity = graph.get_entity(entity_id)
+        if entity:
+            # Build entity attributes
+            attrs = f"id={quoteattr(str(entity.id))} name={quoteattr(entity.name)} type={quoteattr(entity.type)}"
+            xml_parts.append(f"  <entity {attrs}>")
+
+            # Add relationships
+            xml_parts.append("    <rels>")
+            relationships = graph.get_entity_relationships(entity_id)
+
+            # Sort relationships (outgoing first, then incoming)
+            outgoing_first = sorted(
+                relationships,
+                key=lambda r: (
+                    0 if entity and r.source == entity.id else 1,  # Outgoing first
+                    r.type,  # Then by type for consistency
+                ),
+            )
+
+            for rel in outgoing_first:
+                if rel.source == entity.id:
+                    # Outgoing relationship - show target
+                    target_entity = idx.entity_by_id.get(rel.target)
+                    if target_entity:
+                        xml_parts.append(
+                            f'      <rel type={quoteattr(rel.type)} dir="out" to_id={quoteattr(target_entity.id)} to_name={quoteattr(target_entity.name)} to_type={quoteattr(target_entity.type)} />'
+                        )
+                else:
+                    # Incoming relationship - show source
+                    source_entity = idx.entity_by_id.get(rel.source)
+                    if source_entity:
+                        xml_parts.append(
+                            f'      <rel type={quoteattr(rel.type)} dir="in" from_id={quoteattr(source_entity.id)} from_name={quoteattr(source_entity.name)} from_type={quoteattr(source_entity.type)} />'
+                        )
+
+            xml_parts.append("    </rels>")
+            xml_parts.append("  </entity>")
+        else:
+            xml_parts.append(
+                f'  <entity id={quoteattr(entity_id)} type="unknown" name="[Entity not found]"/>'
+            )
+
+    xml_parts.append("</already_retrieved_entities>")
+    return "\n".join(xml_parts)

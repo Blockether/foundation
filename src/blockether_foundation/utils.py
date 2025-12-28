@@ -9,9 +9,7 @@ import secrets
 from collections.abc import Callable, Coroutine
 from dataclasses import fields
 from pathlib import Path
-
-# Import for type hints only
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 from agno.agent import Agent
 from agno.media import Audio
@@ -19,26 +17,20 @@ from agno.models.message import Message
 from agno.run.agent import RunInput, RunOutput
 from agno.run.base import RunContext
 from agno.run.team import TeamRunInput, TeamRunOutput
-from agno.session import AgentSession, TeamSession, WorkflowSession
+from agno.session import AgentSession, TeamSession
 from agno.team import Team
-from agno.workflow import Workflow
-
-if TYPE_CHECKING:
-    from .graph.database import GraphDatabase
 
 T = TypeVar("T")
 
 
 type UserId = str | None
 type DebugMode = bool | None
-type AgnoExecutor = Agent | Team | Workflow
-type AgnoSession = AgentSession | TeamSession | WorkflowSession
 
 type AgnoPreHook = Callable[
     [
-        Agent | Team,  # Note: Must use actual types for introspection, not AgnoExecutor
+        Agent | Team,
         RunInput,
-        AgentSession | TeamSession,  # Note: Must use actual types, not AgnoSession
+        AgentSession | TeamSession,
         UserId,
         DebugMode,
     ],
@@ -47,10 +39,10 @@ type AgnoPreHook = Callable[
 
 type AgnoPostHook = Callable[
     [
-        Agent | Team,  # Note: Must use actual types for introspection, not AgnoExecutor
-        RunOutput | TeamRunOutput,  # The output/response from the agent
-        AgentSession | TeamSession,  # Note: Must use actual types, not AgnoSession
-        RunContext,  # The run context
+        Agent | Team,
+        RunOutput | TeamRunOutput,
+        AgentSession | TeamSession,
+        RunContext,
         UserId,
         DebugMode,
     ],
@@ -68,8 +60,6 @@ InputContentType = (
     | list[Message]
     | None
 )
-
-GLOBAL_AGNO_SESSION_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 
 
 def none_invariant[T](condition: Callable[..., T | None], message: str) -> T:
@@ -169,135 +159,6 @@ def dataclass_copy[T](obj: T, **kwargs: Any) -> T:
     # Create a new instance directly with the filtered values
     # Use type: ignore to silence type checking issues with dynamic instantiation
     return obj.__class__(**current_values)  # type: ignore[arg-type, return-value]
-
-
-def extract_graph(data: dict[Any, Any], graph_name: str) -> GraphDatabase:
-    """Extract a GraphDatabase instance from session data.
-
-    Args:
-        data: Session data dictionary
-        graph_name: Key name for the graph in the data
-
-    Returns:
-        GraphDatabase instance - either a new empty one or reconstructed from data
-    """
-    if data[graph_name] is None:
-        return GraphDatabase()
-    else:
-        return GraphDatabase.from_dict(data[graph_name])
-
-
-def ensure_session_data(session: AgentSession | TeamSession) -> dict[Any, Any]:
-    """Ensure session has a data dictionary and return it.
-
-    Args:
-        session: Agent or Team session instance
-
-    Returns:
-        The session's data dictionary (creates empty one if none exists)
-    """
-    if not session.session_data:
-        session.session_data = {}
-
-    return session.session_data
-
-
-def get_global_session(
-    executor: AgnoExecutor,
-) -> AgnoSession:
-    """Get or create the global session using GLOBAL_AGNO_SESSION_ID.
-
-    Args:
-        executor: Agent, Team, or Workflow instance
-
-    Returns:
-        Global session instance (AgentSession, TeamSession, or WorkflowSession)
-    """
-    # Try to load existing global session
-    global_session = executor.get_session(session_id=GLOBAL_AGNO_SESSION_ID)
-
-    if global_session is None:
-        # Create new global session with the fixed session ID based on object type
-        if isinstance(executor, Agent):
-            global_session = AgentSession(session_id=GLOBAL_AGNO_SESSION_ID)
-        elif isinstance(executor, Team):
-            global_session = TeamSession(session_id=GLOBAL_AGNO_SESSION_ID)
-        elif isinstance(executor, Workflow):
-            global_session = WorkflowSession(session_id=GLOBAL_AGNO_SESSION_ID)
-
-    return global_session
-
-
-def get_global_graph(executor: AgnoExecutor) -> GraphDatabase | None:
-    """Get the global graph from the global session.
-
-    Args:
-        executor: Agent, Team, or Workflow instance (needed to get global session)
-
-    Returns:
-        GraphDatabase if it exists, None otherwise
-    """
-    global_session = get_global_session(executor)
-
-    if not global_session.session_data or "global_graph" not in global_session.session_data:
-        return None
-
-    try:
-        return extract_graph(global_session.session_data, "global_graph")
-    except Exception:
-        return None
-
-
-def ensure_global_graph(executor: AgnoExecutor) -> GraphDatabase:
-    """Ensure global graph exists in global session, creating if needed.
-
-    Args:
-        executor: Agent, Team, or Workflow instance (needed to get global session)
-
-    Returns:
-        GraphDatabase instance (existing or newly created)
-    """
-    from .graph.database import GraphDatabase
-
-    graph = get_global_graph(executor)
-    if graph is not None:
-        return graph
-
-    # Create new graph
-    graph = GraphDatabase()
-
-    # Store in global session
-    global_session = get_global_session(executor)
-    if not global_session.session_data:
-        global_session.session_data = {}
-    global_session.session_data["global_graph"] = graph.to_dict()
-
-    return graph
-
-
-def save_global_graph(
-    executor: AgnoExecutor,
-    graph: GraphDatabase,
-) -> None:
-    """Save global graph back to global session.
-
-    Args:
-        executor: Agent, Team, or Workflow instance (needed to get and save global session)
-        graph: GraphDatabase instance to save
-    """
-    global_session = get_global_session(executor)
-
-    if not global_session.session_data:
-        global_session.session_data = {}
-    global_session.session_data["global_graph"] = graph.to_dict()
-
-    # Type casting is safe here because we created the session type to match the object type
-    if isinstance(executor, Agent):
-        executor.save_session(cast(AgentSession, global_session))
-    elif isinstance(executor, Team):
-        executor.save_session(cast(TeamSession, global_session))
-    elif isinstance(executor, Workflow):
-        executor.save_session(cast(WorkflowSession, global_session))
 
 
 def inject_context_to_run_input(
@@ -423,43 +284,24 @@ def build_extraction_context(
     input_content = run_input.input_content_string() if run_input else ""
     response_content = ""
     if run_output is not None:
-        response_content = cast(str, run_output.get_content_as_string())  # type: ignore
+        response_content = cast(str, run_output.get_content_as_string())
 
     if not response_content:
         return ""
 
     # Build full context for extraction
     if input_content:
-        return f"<user_message>\n{input_content}</user_message>\n\n<assistant_response>\n{response_content}</assistant_response>"
+        return f"<original_user_message>\n{input_content}</original_user_message>\n\n<assistant_response>\n{response_content}</assistant_response>"
     else:
         return f"<assistant_response>\n{response_content}</assistant_response>"
 
 
-def build_agent_context(agent: Agent | Team) -> str:
-    """Build context string with agent's main instructions.
-
-    This function extracts the agent's purpose and instructions to provide
-    context for post-processing operations.
-
-    Args:
-        agent: The Agent or Team instance
-
-    Returns:
-        Context string with agent instructions in XML format
-    """
-    agent_context = ""
-    if isinstance(agent, Agent) and agent.instructions:  # type: ignore
-        agent_context = f"\n\n<agent_context>\nThe main agent's purpose and instructions:\n{agent.instructions}</agent_context>"  # type: ignore
-    elif isinstance(agent, Team) and agent.instructions:  # type: ignore
-        agent_context = f"\n\n<agent_context>\nThe main agent's purpose and instructions:\n{agent.instructions}</agent_context>"  # type: ignore
-    return agent_context
-
-
 def create_agent_with_instructions(
     description: str,
-    instructions: list[str],
+    instructions: list[str] | str,
     model: Any | None = None,
     debug_mode: DebugMode = False,
+    expected_output: str | None = None,
     output_schema: Any | None = None,
 ) -> Agent:
     """Create an agent with structured description and instructions.
@@ -480,6 +322,7 @@ def create_agent_with_instructions(
     agent_kwargs: dict[str, Any] = {
         "description": description,
         "instructions": instructions,
+        "expected_output": expected_output,
         "debug_mode": debug_mode or False,
     }
 
@@ -501,7 +344,7 @@ async def execute_agent_async(agent: Agent, context: str) -> RunOutput:
     Returns:
         The agent's output
     """
-    return await agent.arun(context)  # type: ignore
+    return await agent.arun(context)
 
 
 def execute_agent_sync(agent: Agent, context: str) -> RunOutput:
@@ -514,7 +357,7 @@ def execute_agent_sync(agent: Agent, context: str) -> RunOutput:
     Returns:
         The agent's output
     """
-    return agent.run(context)  # type: ignore
+    return agent.run(context)
 
 
 def save_data_to_json_file(

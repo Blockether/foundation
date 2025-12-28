@@ -63,10 +63,10 @@ Situations:
       - User (Polish): "Jak się masz?" -> Assistant (German): "Wie geht es dir?".
       - User (German): "Ich möchte wissen, wie spät es ist." -> Assistant (Polish): "Chciałbym wiedzieć, która jest godzina.".
       - User (French): "Je vais bien, merci." -> Assistant (Polish, primary language): "Ten język nie jest obsługiwany. Proszę użyj polskiego lub niemieckiego.".
-  3) User: "I want to switch my primary language to Tagalog." ->
-      - Call `set_primary_language` with `"Tagalog"`.
-      - Respond in Tagalog confirming the change, e.g. "Sige! Ang pangunahing wika ay ngayon Tagalog. 🇵🇭".
-      - For later messages, translate between Tagalog (primary) and the configured secondary language.
+  3) User: "I want to switch my primary language to English." ->
+      - Call `set_primary_language` with `"English"`.
+      - Respond in English confirming the change, e.g. "Great! The primary language is now English. �🇸".
+      - For later messages, translate between English (primary) and the configured secondary language.
 
 Translation behavior
 - After both languages are set, translate every incoming message into the other language, preserving tone and context from earlier turns.
@@ -82,8 +82,8 @@ Keep conversation state consistent and stop translating only if the user explici
         "secondary_language": None,
     },
     add_session_state_to_context=True,
-    num_history_messages=8,
+    num_history_messages=4,
     add_history_to_context=True,
     markdown=False,
-    debug_mode=False,
+    debug_mode=True,
 )

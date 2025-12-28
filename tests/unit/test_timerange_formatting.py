@@ -1,6 +1,5 @@
 """Test Timerange formatting functionality."""
 
-import pytest
 from src.blockether_foundation.agents.transcriber import Timerange
 
 

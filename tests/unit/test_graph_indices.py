@@ -94,16 +94,7 @@ class TestGraphIndex:
         updated_date = entity.updated_at.date()
         assert entity.id in index.entities_by_updated_date[updated_date]
 
-        # Check prefix indices
-        assert entity.id in index.entities_by_id_prefix["ent"]
-        assert entity.id in index.entities_by_id_prefix["entity"]
-        assert entity.id in index.entities_by_id_prefix[entity.id.lower()]
-
-        # Check name prefix indices
-        assert entity.id in index.entities_by_name_prefix["test"]
-        assert entity.id in index.entities_by_name_prefix["test entity"]
-
-        # Content words are no longer indexed - using Tantivy for search instead
+        # Note: Prefix indices removed - using Tantivy for search instead
 
     @pytest.mark.unit
     def test_remove_entity_cleans_all_indices(self, sample_entities: list[Entity]) -> None:
@@ -125,11 +116,7 @@ class TestGraphIndex:
         assert entity.id not in index.entities_by_created_date[entity.created_at.date()]
         assert entity.id not in index.entities_by_updated_date[entity.updated_at.date()]
 
-        # Check prefix indices are cleaned
-        assert entity.id not in index.entities_by_id_prefix["entity"]
-        assert entity.id not in index.entities_by_name_prefix["test"]
-
-        # Content words are no longer indexed - using Tantivy for search instead
+        # Note: Prefix indices removed - using Tantivy for search instead
 
     @pytest.mark.unit
     def test_update_entity_reindexes_correctly(self, sample_entities: list[Entity]) -> None:
@@ -233,8 +220,7 @@ class TestGraphIndex:
         assert len(index.entities_by_updated_date) == 0
         assert len(index.outgoing_edges) == 0
         assert len(index.incoming_edges) == 0
-        assert len(index.entities_by_id_prefix) == 0
-        assert len(index.entities_by_name_prefix) == 0
+        # Note: Prefix indices removed - using Tantivy for search instead
 
     @pytest.mark.unit
     def test_to_dict_serialization(
@@ -260,8 +246,7 @@ class TestGraphIndex:
         assert "entities_by_updated_date" in data
         assert "outgoing_edges" in data
         assert "incoming_edges" in data
-        assert "entities_by_id_prefix" in data
-        assert "entities_by_name_prefix" in data
+        # Note: Prefix indices removed - using Tantivy for search instead
 
         # Check data integrity
         entity_by_id = cast(dict[str, Any], data["entity_by_id"])
@@ -314,8 +299,8 @@ class TestGraphIndex:
         )
 
     @pytest.mark.unit
-    def test_case_insensitive_prefix_search(self) -> None:
-        """Test that prefix searches are case insensitive."""
+    def test_basic_indexing_functionality(self) -> None:
+        """Test that basic indexing functionality works without prefix indices."""
         index = GraphIndex()
 
         entity = Entity(
@@ -329,14 +314,15 @@ class TestGraphIndex:
 
         index.add_entity(entity)
 
-        # Test prefixes (indexing uses lowercase)
-        assert entity.id in index.entities_by_id_prefix["test"]
-        assert entity.id not in index.entities_by_id_prefix["TEST"]  # Uppercase not indexed
-        assert entity.id not in index.entities_by_id_prefix["Test"]  # Mixed case not indexed
+        # Test basic indexing (no prefix indices anymore)
+        assert entity.id in index.entity_by_id
+        assert entity.name in index.entity_by_name
+        assert entity.id in index.entities_by_type["concept"]
 
-        assert entity.id in index.entities_by_name_prefix["test"]
-        assert entity.id not in index.entities_by_name_prefix["TEST"]  # Uppercase not indexed
-        assert entity.id not in index.entities_by_name_prefix["Test"]  # Mixed case not indexed
+        # Test date indexing
+        today = datetime.now(UTC).date()
+        assert entity.id in index.entities_by_created_date[today]
+        assert entity.id in index.entities_by_updated_date[today]
 
     @pytest.mark.unit
     def test_date_based_indexing(self) -> None:

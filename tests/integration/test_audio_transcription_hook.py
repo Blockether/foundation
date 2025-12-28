@@ -1,29 +1,15 @@
 """Test the audio transcription hook functionality."""
 
-from collections.abc import Callable, Coroutine
 from pathlib import Path
 
 import pytest
 from agno.agent import Agent
 from agno.media import Audio
 from agno.run.agent import RunInput
-from agno.session import AgentSession, TeamSession
-from agno.team import Team
+from agno.session import AgentSession
 
-from blockether_foundation.agents.hooks.audio import AudioHooksConfig
-from blockether_foundation.utils import DebugMode, UserId
-
-# Explicit type for the hook function
-AudioHookType = Callable[
-    [
-        Agent | Team,
-        RunInput,
-        AgentSession | TeamSession,
-        UserId,
-        DebugMode,
-    ],
-    Coroutine[None, None, None],
-]
+from blockether_foundation.agents.hooks import TranscriptionHooksConfig
+from blockether_foundation.asr import LocalWhisperAudioTranscriber
 
 # Get the path to the test resources relative to the test file
 TEST_RESOURCES = Path(__file__).parent.parent / "test-resources"
@@ -41,7 +27,7 @@ async def test_audio_transcription_hook_with_sample_ogg():
     assert audio_file.exists(), f"Test audio file not found: {audio_file}"
 
     # Create the audio transcription hook
-    config = AudioHooksConfig()
+    config = TranscriptionHooksConfig(transcriber=LocalWhisperAudioTranscriber(model_id="tiny"))
     hook: AudioHookType = config.pre_hook()  # type: ignore
 
     # Create a RunInput with the sample.ogg audio
@@ -69,13 +55,15 @@ async def test_audio_transcription_hook_with_sample_ogg():
 
     # Get the input content and verify the transcript was injected
     content = run_input.input_content_string()
-    assert "--- Audio Transcription |" in content, "Transcript header should be injected into input content"
+    assert "--- Audio Transcription |" in content, (
+        "Transcript header should be injected into input content"
+    )
     assert "<transcription>" in content, "Transcript should be in XML format"
-    assert 'language=' in content, "XML should contain language attribute"
+    assert "language=" in content, "XML should contain language attribute"
 
     # Extract and verify the transcript content
     transcript_start = content.find("<transcription>")
-    transcript = content[transcript_start:transcript_start + 1000]  # Limit to first 1000 chars
+    transcript = content[transcript_start : transcript_start + 1000]  # Limit to first 1000 chars
 
     # Verify the XML transcript format
     assert "<metadata" in transcript, "Should have metadata element"
@@ -86,7 +74,9 @@ async def test_audio_transcription_hook_with_sample_ogg():
     # Verify file metadata is included in the header and XML
     assert "sample.ogg" in content, "Should include filename in header"
     assert "--- Audio Transcription | 1 file(s):" in content, "Should show file count in header"
-    assert "--- Audio Transcription | 1 file(s): sample.ogg ---" in content, "Should show full header format"
+    assert "--- Audio Transcription | 1 file(s): sample.ogg ---" in content, (
+        "Should show full header format"
+    )
 
 
 @pytest.mark.integration
@@ -94,7 +84,7 @@ async def test_audio_transcription_hook_no_audio():
     """Test that the audio transcription hook handles input with no audio gracefully."""
 
     # Create the audio transcription hook
-    config = AudioHooksConfig()
+    config = TranscriptionHooksConfig(transcriber=LocalWhisperAudioTranscriber(model_id="tiny"))
     hook: AudioHookType = config.pre_hook()  # type: ignore
 
     # Create a RunInput with no audio
@@ -120,7 +110,7 @@ async def test_audio_transcription_hook_multiple_audios():
     """Test that the audio transcription hook handles multiple audio files."""
 
     # Create the audio transcription hook
-    config = AudioHooksConfig()
+    config = TranscriptionHooksConfig(transcriber=LocalWhisperAudioTranscriber(model_id="tiny"))
     hook: AudioHookType = config.pre_hook()  # type: ignore
 
     # Use sample.ogg twice to simulate multiple audio files

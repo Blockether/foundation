@@ -874,20 +874,17 @@ class TestGraphSerializationAndRecovery:
         serialized = original_db.to_dict()
 
         # Verify structure using accumulation pattern
-        required_keys = ["entities", "relationships", "index", "search_index_initialized"]
+        required_keys = ["index", "tantivy_index_path"]
         key_presence_flags = [key in serialized for key in required_keys]
 
         assert all(key_presence_flags), "All required keys should be present in serialized data"
 
-        entities_data: list[dict[str, Any]] = cast(
-            list[dict[str, Any]], serialized.get("entities", [])
-        )
-        relationships_data: list[dict[str, Any]] = cast(
-            list[dict[str, Any]], serialized.get("relationships", [])
-        )
-        assert len(entities_data) == 2, "Should serialize 2 entities"
-        assert len(relationships_data) == 1, "Should serialize 1 relationship"
-        assert serialized["search_index_initialized"] is True, "Search index should be initialized"
+        # Verify index contains entities and relationships
+        index_data = cast(dict[str, Any], serialized.get("index", {}))
+        entities_in_index = index_data.get("entity_by_id", {})
+        relationships_in_index = index_data.get("relationship_by_id", {})
+        assert len(entities_in_index) == 2, "Should serialize 2 entities in index"
+        assert len(relationships_in_index) == 1, "Should serialize 1 relationship in index"
 
         # Test JSON roundtrip
         json_str = json.dumps(serialized, indent=2, default=str)
@@ -2372,7 +2369,7 @@ class TestNewQueryAPI:
                 LLMEntityQuery(
                     reasoning="Search Python",
                     confidence=1.0,
-            importance=DEFAULT_CONFIDENCE,
+                    importance=DEFAULT_CONFIDENCE,
                     search_query="Python",
                     limit=5,
                 )
@@ -2392,7 +2389,7 @@ class TestNewQueryAPI:
                 LLMEntityQuery(
                     reasoning="Search ML",
                     confidence=1.0,
-            importance=DEFAULT_CONFIDENCE,
+                    importance=DEFAULT_CONFIDENCE,
                     search_query="TensorFlow",
                     entity_types=("object",),
                 )
@@ -2411,7 +2408,7 @@ class TestNewQueryAPI:
                 LLMEntityQuery(
                     reasoning="No match",
                     confidence=1.0,
-            importance=DEFAULT_CONFIDENCE,
+                    importance=DEFAULT_CONFIDENCE,
                     search_query="completely non existent term xyz123",
                 )
             ],
@@ -2633,7 +2630,10 @@ class TestGraphDatabaseEdgeCases:
             importance=DEFAULT_CONFIDENCE,
         )
         operations = LLMGraphQueryOperations(
-            entity_queries=[entity_query], reasoning="Test operations", confidence=1.0, importance=DEFAULT_CONFIDENCE
+            entity_queries=[entity_query],
+            reasoning="Test operations",
+            confidence=1.0,
+            importance=DEFAULT_CONFIDENCE,
         )
 
         # Translate to query - this will hit line 706 when iterating through entity_types[1:]
@@ -2725,19 +2725,17 @@ class TestGraphDatabaseEdgeCases:
         assert db.get_entity(entity.id) is None
 
     @pytest.mark.unit
-    def test_from_dict_without_index_data(self) -> None:
-        """Test deserializing from dict without index data (lines 923-926)."""
-        # Create entities and relationships data
+    def test_from_dict_with_index_data(self) -> None:
+        """Test deserializing from dict with proper index data."""
+        # Create a database and serialize it
+        original_db = GraphDatabase()
         entity1 = Entity(name="Entity1", type=TYPE_CONCEPT)
         entity2 = Entity(name="Entity2", type=TYPE_CONCEPT)
-        rel = Relationship(source=entity1.id, target=entity2.id, type=REL_TYPE_RELATED_TO)
+        original_db.add_entities([entity1, entity2])
+        original_db.create_relationship(entity1.id, entity2.id, REL_TYPE_RELATED_TO)
 
-        # Create data dict without index
-        data: dict[str, Any] = {
-            "entities": [entity1.to_dict(), entity2.to_dict()],
-            "relationships": [rel.to_dict()],
-            "search_index_initialized": False,
-        }
+        # Serialize
+        data = original_db.to_dict()
 
         # Deserialize
         db = GraphDatabase.from_dict(data)
@@ -2747,7 +2745,21 @@ class TestGraphDatabaseEdgeCases:
         assert db.relationship_count == 1
         assert db.get_entity(entity1.id) is not None
         assert db.get_entity(entity2.id) is not None
-        assert db.get_relationship(rel.id) is not None
+
+    @pytest.mark.unit
+    def test_from_dict_without_index_data_returns_empty_db(self) -> None:
+        """Test deserializing from dict without index data returns empty database."""
+        # Create data dict without index
+        data: dict[str, Any] = {
+            "tantivy_index_path": None,
+        }
+
+        # Deserialize
+        db = GraphDatabase.from_dict(data)
+
+        # Verify empty database is returned
+        assert db.entity_count == 0
+        assert db.relationship_count == 0
 
     @pytest.mark.unit
     def test_entity_type_filter_without_index(self) -> None:

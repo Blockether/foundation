@@ -62,18 +62,21 @@ class BaseModelSerializable(BaseModel):
 
 
 class ChainOfThoughts(BaseModelSerializable):
-    reasoning: str = Field(
-        description="Step-by-step reasoning process explaining how you reached your conclusion. Include relevant context, considered alternatives, and key decision factors. Format as markdown with bullet points or numbered lists in case of reasoning steps for clarity. Prefer concise and clear explanations."
+    reasoning: str | None = Field(
+        default=None,
+        description="Step-by-step reasoning process explaining how you reached your conclusion. Include relevant context, step-by-step analysis including the rationale for the importance and confidence scores. Prefer concise and clear explanations. Omit reasoning for simple or self-evident observations. Plain text only, no markdown.",
     )
 
     importance: float | None = Field(
+        default=None,
         description="Importance score (0.0 to 1.0) indicating how critical this observation is to the overall task or decision-making process.",
         ge=0.0,
         le=1.0,
     )
 
     confidence: float = Field(
-        description="Confidence level (0.0 to 1.0) in the reasoning process and the trust score of values of the accompanying fields.",
+        default=0.5,
+        description="Confidence level (0.0 to 1.0) in the reasoning process and/or the trust score of values of the accompanying fields.",
         ge=0.0,
         le=1.0,
     )

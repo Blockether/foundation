@@ -12,12 +12,11 @@ from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 from agno.agent import Agent
+from agno.media import Audio
 from agno.team import Team
 from agno.utils.log import logger
 from agno.workflow import Workflow
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-
-from blockether_foundation.audio import AudioTranscriber
 
 from .models import BotConfig, HealthResponse, Update, WebhookResponse
 
@@ -51,6 +50,7 @@ def attach_routes(
     bot_config: BotConfig,
     task_scheduler: BackgroundTaskScheduler | None = None,
     scheduler_managed_by_middleware: bool = False,
+    use_async_executor: bool = True,
 ) -> APIRouter:
     # ignore-development
     """Attach minimal Telegram webhook routes to the router."""
@@ -233,7 +233,10 @@ def format_message_for_executor(update: Update, transcription: str | None = None
 
 
 async def process_update_async(
-    update: Update, executor: Agent | Team | Workflow | None, bot_config: BotConfig
+    update: Update,
+    executor: Agent | Team | Workflow | None,
+    bot_config: BotConfig,
+    use_async_executor: bool = True,
 ) -> None:
     """Process a Telegram update asynchronously."""
 
@@ -261,11 +264,10 @@ async def process_update_async(
             f"Executor start: update_id={update.update_id}, user_id={user_id}, executor_type={executor_type}"
         )
 
-        # Check for audio/voice and transcribe if needed
-        transcription = await _transcribe_audio_if_present(update, bot_config.token)
+        audio_list = await _extract_audio_from_update(update, bot_config.token)
 
         # Format message for executor
-        formatted_message = format_message_for_executor(update, transcription)
+        formatted_message = format_message_for_executor(update)
         chat_id = extract_chat_id(update)
 
         # Configure timeout
@@ -274,12 +276,20 @@ async def process_update_async(
         # Send to executor if available with timeout
         if executor:
             try:
-                # Use asyncio.wait_for to prevent blocking indefinitely
-                # Wrap the sync executor.run call in a lambda for asyncio.to_thread
-                result: ExecutorResult = await asyncio.wait_for(
-                    asyncio.to_thread(lambda: executor.run(formatted_message)),  # type: ignore[arg-type]
-                    timeout=timeout,
-                )
+                # Use async arun for better performance with async hooks (e.g., audio transcription)
+                # Fall back to sync run wrapped in thread if arun is not available
+                if use_async_executor:
+                    result: ExecutorResult = await asyncio.wait_for(
+                        executor.arun(formatted_message, audio=audio_list or None),  # type: ignore[arg-type]
+                        timeout=timeout,
+                    )
+                else:
+                    result: ExecutorResult = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            lambda: executor.run(formatted_message, audio=audio_list or None)  # type: ignore
+                        ),
+                        timeout=timeout,
+                    )
 
                 # Log successful completion
                 duration_ms = int((datetime.now(UTC) - start_time).total_seconds() * 1000)
@@ -328,19 +338,33 @@ def _schedule_update_processing(
     bot_config: BotConfig,
     background_tasks: BackgroundTasks,
     task_scheduler: BackgroundTaskScheduler | None,
+    use_async_executor: bool = True,
 ) -> None:
     """Dispatch task via configured scheduler or FastAPI background tasks."""
 
     if task_scheduler:
-        task_scheduler.add_task(_run_process_update_sync, update, executor, bot_config)
+        task_scheduler.add_task(
+            _run_process_update_sync,
+            update,
+            executor,
+            bot_config,
+            use_async_executor=use_async_executor,
+        )
     else:
         background_tasks.add_task(
-            process_update_async, update=update, executor=executor, bot_config=bot_config
+            process_update_async,
+            update=update,
+            executor=executor,
+            bot_config=bot_config,
+            use_async_executor=use_async_executor,
         )
 
 
 def _run_process_update_sync(
-    update: Update, executor: Agent | Team | Workflow | None, bot_config: BotConfig
+    update: Update,
+    executor: Agent | Team | Workflow | None,
+    bot_config: BotConfig,
+    use_async_executor: bool = True,
 ) -> None:
     """Execute the async update processor inside a fresh event loop."""
     try:
@@ -350,10 +374,22 @@ def _run_process_update_sync(
 
     if loop and loop.is_running():
         loop.create_task(
-            process_update_async(update=update, executor=executor, bot_config=bot_config)
+            process_update_async(
+                update=update,
+                executor=executor,
+                bot_config=bot_config,
+                use_async_executor=use_async_executor,
+            )
         )
     else:
-        asyncio.run(process_update_async(update=update, executor=executor, bot_config=bot_config))
+        asyncio.run(
+            process_update_async(
+                update=update,
+                executor=executor,
+                bot_config=bot_config,
+                use_async_executor=use_async_executor,
+            )
+        )
 
 
 def _notify_scheduler_done(
@@ -546,36 +582,32 @@ async def _download_file_from_telegram(token: str, file_id: str) -> bytes | None
         return None
 
 
-async def _transcribe_audio_if_present(update: Update, token: str) -> str | None:
-    """Check for audio in update and transcribe if present."""
+async def _extract_audio_from_update(update: Update, token: str) -> list[Audio]:
     if not update.message:
-        return None
+        return []
 
     file_id = None
+    audio_format = "ogg"
 
-    # Check for voice note
     if "voice" in update.message:
         file_id = update.message["voice"].get("file_id")
-        logger.info(f"Processing voice message: {file_id}")  # type: ignore[arg-type]
+        audio_format = "ogg"
+        logger.info(f"Extracting voice message: {file_id}")  # type: ignore[arg-type]
 
-    # Check for audio file
     elif "audio" in update.message:
         file_id = update.message["audio"].get("file_id")
-        logger.info(f"Processing audio message: {file_id}")  # type: ignore[arg-type]
+        mime_type = update.message["audio"].get("mime_type", "")
+        if "mp3" in mime_type:
+            audio_format = "mp3"
+        elif "wav" in mime_type:
+            audio_format = "wav"
+        logger.info(f"Extracting audio message: {file_id}")  # type: ignore[arg-type]
 
     if not file_id:
-        return None
+        return []
 
     audio_data = await _download_file_from_telegram(token, file_id)
     if not audio_data:
-        return None
+        return []
 
-    try:
-        transcription = await AudioTranscriber.get_instance().transcribe(audio_data)
-        if transcription:
-            logger.info(f"Transcription successful: {transcription.text[:50]}...")  # type: ignore[arg-type]
-            return transcription.text
-        return None
-    except Exception as e:
-        logger.error(f"Error processing audio: {e}")
-        return None
+    return [Audio(content=audio_data, format=audio_format, id=file_id)]

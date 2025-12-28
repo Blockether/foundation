@@ -25,8 +25,6 @@ class GraphIndex:
     entities_by_updated_date: dict[date, set[str]] = field(default_factory=lambda: defaultdict(set))
     outgoing_edges: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     incoming_edges: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
-    entities_by_id_prefix: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
-    entities_by_name_prefix: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
 
     def add_entity(self, entity: Entity) -> None:
         """Add entity to all relevant indices."""
@@ -35,18 +33,6 @@ class GraphIndex:
         self.entities_by_type[entity.type].add(entity.id)
         self.entities_by_created_date[entity.created_at.date()].add(entity.id)
         self.entities_by_updated_date[entity.updated_at.date()].add(entity.id)
-
-        # Index ID prefixes for fast substring searches
-        entity_id_lower = entity.id.lower()
-        for i in range(1, len(entity_id_lower) + 1):
-            prefix = entity_id_lower[:i]
-            self.entities_by_id_prefix[prefix].add(entity.id)
-
-        # Index name prefixes for fast substring searches
-        entity_name_lower = entity.name.lower()
-        for i in range(1, len(entity_name_lower) + 1):
-            prefix = entity_name_lower[:i]
-            self.entities_by_name_prefix[prefix].add(entity.id)
 
     def update_entity(self, old_entity: Entity, new_entity: Entity) -> None:
         """Update entity in all relevant indices."""
@@ -60,18 +46,6 @@ class GraphIndex:
         self.entities_by_type[entity.type].discard(entity.id)
         self.entities_by_created_date[entity.created_at.date()].discard(entity.id)
         self.entities_by_updated_date[entity.updated_at.date()].discard(entity.id)
-
-        # Remove from ID prefix index
-        entity_id_lower = entity.id.lower()
-        for i in range(1, len(entity_id_lower) + 1):
-            prefix = entity_id_lower[:i]
-            self.entities_by_id_prefix[prefix].discard(entity.id)
-
-        # Remove from name prefix index
-        entity_name_lower = entity.name.lower()
-        for i in range(1, len(entity_name_lower) + 1):
-            prefix = entity_name_lower[:i]
-            self.entities_by_name_prefix[prefix].discard(entity.id)
 
     def add_relationship(self, relationship: Relationship) -> None:
         """Add relationship to all relevant indices."""
@@ -105,8 +79,6 @@ class GraphIndex:
         self.entities_by_updated_date.clear()
         self.outgoing_edges.clear()
         self.incoming_edges.clear()
-        self.entities_by_id_prefix.clear()
-        self.entities_by_name_prefix.clear()
 
     def to_dict(self) -> dict[str, object]:
         """Serialize index to dictionary.
@@ -130,10 +102,6 @@ class GraphIndex:
             },
             "outgoing_edges": {k: list(v) for k, v in self.outgoing_edges.items()},
             "incoming_edges": {k: list(v) for k, v in self.incoming_edges.items()},
-            "entities_by_id_prefix": {k: list(v) for k, v in self.entities_by_id_prefix.items()},
-            "entities_by_name_prefix": {
-                k: list(v) for k, v in self.entities_by_name_prefix.items()
-            },
         }
 
     @classmethod
@@ -199,14 +167,5 @@ class GraphIndex:
         incoming_edges_data = cast(dict[str, list[str]], data.get("incoming_edges", {}))
         for target, sources in incoming_edges_data.items():
             index.incoming_edges[target] = set(sources)
-
-        # Restore text search indices
-        id_prefix_data = cast(dict[str, list[str]], data.get("entities_by_id_prefix", {}))
-        for prefix, entity_ids in id_prefix_data.items():
-            index.entities_by_id_prefix[prefix] = set(entity_ids)
-
-        name_prefix_data = cast(dict[str, list[str]], data.get("entities_by_name_prefix", {}))
-        for prefix, entity_ids in name_prefix_data.items():
-            index.entities_by_name_prefix[prefix] = set(entity_ids)
 
         return index

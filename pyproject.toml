@@ -15,12 +15,18 @@ dependencies = [
     "tenacity>=9.1.2",
     "tantivy>=0.25.1",
     "agno>=2.3.19",
-    "faster-whisper>=1.2.1",
     "sqlalchemy>=2.0.45",
     "litellm>=1.80.10",
+    "numpy>=2.2.6",
 ]
 
 [project.optional-dependencies]
+asr_local = ["faster-whisper>=1.2.1", "av>=15.1.0"]
+tts_local = ["coqui-tts>=0.27.3", "torchcodec>=0.9.1", "pydub>=0.25.1"]
+tts_elevenlabs = ["elevenlabs>=2.27.0"]
+private_proprietary_voices = [
+    "foundation-proprietary-voices @ git+ssh://git@github.com/Blockether/foundation_proprietary_voices.git",
+]
 dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
@@ -136,7 +142,7 @@ reportOverlappingOverload = "error"
 reportUnnecessaryTypeIgnoreComment = "error"
 reportUnknownArgumentType = "error"
 reportUnknownLambdaType = "error"
-reportUnknownMemberType = "error"
+reportUnknownMemberType = "none"              # TTS library has incomplete type stubs
 reportUnknownParameterType = "error"
 reportUnknownVariableType = "error"
 

@@ -1,0 +1,51 @@
+"""Consensus hooks for Agno agents - Multi-model agreement through structured rounds."""
+
+from blockether_foundation.agents.hooks.consensus.core import (
+    Assumption,
+    ConfidenceBreakdown,
+    ConflictResolution,
+    ConsensusHooksConfig,
+    ConsensusResult,
+    ConsensusSynthesis,
+    ConsideredAlternative,
+    CritiqueFeedback,
+    GenerationOutput,
+    IncorporatedInsight,
+    JudgeCriteria,
+    JudgeResult,
+    JudgeVerdict,
+    ModelConfig,
+    ModelContribution,
+    RefinementAction,
+    RejectedApproach,
+    StrengthWeakness,
+    SuggestedImprovement,
+)
+from blockether_foundation.agents.hooks.consensus.presentation import (
+    export_consensus_report_to_html,
+    generate_consensus_report_html,
+)
+
+__all__ = [
+    "Assumption",
+    "ConfidenceBreakdown",
+    "ConflictResolution",
+    "ConsensusHooksConfig",
+    "ConsensusResult",
+    "ConsensusSynthesis",
+    "ConsideredAlternative",
+    "CritiqueFeedback",
+    "GenerationOutput",
+    "IncorporatedInsight",
+    "JudgeCriteria",
+    "JudgeResult",
+    "JudgeVerdict",
+    "ModelConfig",
+    "ModelContribution",
+    "RefinementAction",
+    "RejectedApproach",
+    "StrengthWeakness",
+    "SuggestedImprovement",
+    "export_consensus_report_to_html",
+    "generate_consensus_report_html",
+]

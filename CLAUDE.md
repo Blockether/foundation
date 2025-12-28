@@ -2,81 +2,132 @@
 
 > **IMPORTANT:** `GEMINI.md` and `AGENTS.md` are symlinks to this file (`CLAUDE.md`). Always edit `CLAUDE.md` directly when updating project guidelines.
 
-## Scripts & Agents
+<skills_system priority="1">
 
-### Script Organization
+## Available Skills
 
-- **scripts/** - Main entry scripts (bash scripts, CLI tools) for agents
-- **scripts/impl/** - Implementation details (Python scripts, internal logic) for agents
+<!-- SKILLS_TABLE_START -->
+<usage>
+When users ask you to perform tasks, check if any of the available skills below can help complete the task more effectively. Skills provide specialized capabilities and domain knowledge.
 
-These scripts are specifically for agents and should be used by agents when performing automated tasks. Users should not directly execute these scripts - they are designed to be called by agents as part of their workflow.
+How to use skills:
+- Invoke: Bash("openskills read <skill-name>")
+- The skill content will load with detailed instructions on how to complete the task
+- Base directory provided in output for resolving bundled resources (references/, scripts/, assets/)
 
-### Script Documentation Requirements
+Usage notes:
+- Only use skills listed in <available_skills> below
+- Do not invoke a skill that is already loaded in your context
+- Each skill invocation is stateless
+</usage>
 
-All bash scripts in `scripts/` must include comprehensive documentation at the top of the file containing:
+<available_skills>
 
-1. **Purpose**: Clear description of what the script does
-2. **Usage**: Complete usage examples with all available options
-3. **Arguments**: Detailed explanation of all command-line arguments
-4. **Examples**: Real-world usage examples
-5. **Dependencies**: List of any external tools or scripts required
-6. **Output**: Description of what the script outputs and exit codes
+<skill>
+<name>skill-creator</name>
+<description>Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Claude's capabilities with specialized knowledge, workflows, or tool integrations.</description>
+<location>project</location>
+</skill>
 
-Implementation scripts should be placed in the `impl/` subdirectory to keep the main scripts directory clean and focused on user-facing tools.
+</available_skills>
+<!-- SKILLS_TABLE_END -->
 
-## Code Style Guidelines
+</skills_system>
 
-- **No emojis in code**: Do not use emojis in logging statements, comments, or any code. Use clear, descriptive text instead.
-- **Use standard library for HTTP requests**: Always use Python's built-in urllib.request module for making HTTP requests instead of external HTTP libraries.
+## Optional Dependencies
 
-## Agno Hooks Implementation
+When adding features that require optional dependencies (e.g., local ASR, ML libraries), follow this pattern:
 
-### Post-Hooks Signature and Usage
+### 1. Define optional dependency group in `pyproject.toml`
 
-When implementing post-hooks for Agno agents, follow these guidelines:
-
-#### Required Imports
-```python
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
-from agno.session import AgentSession, TeamSession
+```toml
+[project.optional-dependencies]
+feature_name = [
+    "package>=version",
+    "another-package>=version",
+]
 ```
 
-#### Proper Post-Hook Signature
+### 2. Use `importlib.metadata` to check availability
+
+Check if the main package is installed using package metadata (NOT try/except imports):
+
 ```python
-async def hook(
-    *,
-    agent: Agent = None,                      # Agent instance (None for Team runs)
-    team: Team = None,                         # Team instance (None for Agent runs)
-    run_output: Union[RunOutput, TeamRunOutput],  # Output of the current run
-    session: AgentSession | TeamSession,         # Session object
-    user_id: str = None,                        # Optional user ID
-    debug_mode: bool = None,                    # Optional debug mode flag
-) -> None:
+# Check if feature dependencies are installed
+try:
+    from importlib.metadata import version
+    version("package_name")
+    FEATURE_AVAILABLE = True
+except Exception:
+    FEATURE_AVAILABLE = False
 ```
 
-#### Accessing Input and Output Content
+**Why:** This is a single, deterministic check. If the main package is installed, its dependencies will be too.
 
-- **Input content**: Use `run_output.input.input_content_string()` to get the user's input
-- **Output content**: Use `run_output.get_content_as_string()` to get the agent's response
+### 3. Use lazy `__getattr__` for exports
 
-Example:
+Never import optional dependencies at module level in `__init__.py`. Use `__getattr__`:
+
 ```python
-# Extract both input and output from RunOutput
-input_content = ""
-if run_output.input:
-    input_content = run_output.input.input_content_string()
+# __init__.py
+from . import feature_module
 
-response_content = run_output.get_content_as_string()
+__all__ = ["FeatureClass", "FEATURE_AVAILABLE"]
 
-# Combine for full context
-full_context = f"User: {input_content}\nAssistant: {response_content}"
+def __getattr__(name: str):
+    if name == "FeatureClass":
+        return feature_module.FeatureClass
+    if name == "FEATURE_AVAILABLE":
+        return feature_module.FEATURE_AVAILABLE
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 ```
 
-#### Important Notes
+**Why:** This allows the package to be imported without the optional dependencies present. Imports only happen when the attribute is actually accessed.
 
-- Post-hooks receive `RunOutput` objects that contain both input and output
-- Use keyword-only arguments (`*`) to match Agno's expected signature
-- For team runs, `agent` will be None and vice versa
-- The `input` attribute on RunOutput is of type `Optional[RunInput]`
-- Avoid using parameters like `session_state`, `dependencies`, and `metadata` as they may not be consistently provided
+**Important Note for Type Annotations:**
+When using optional dependencies in function type signatures (outside of `TYPE_CHECKING` blocks), use string literal type annotations to avoid `NameError` at module import time:
+
+```python
+# ❌ WRONG - This will fail at import time if LocalWhisperAudioTranscriber isn't imported yet
+def my_func(audio_transcriber: LocalWhisperAudioTranscriber | None = None):
+    ...
+
+# ✅ CORRECT - String literal avoids the NameError
+def my_func(audio_transcriber: "LocalWhisperAudioTranscriber | None" = None):
+    ...
+```
+
+### 4. Provide helpful error messages
+
+    Create a helper function that raises ImportError with installation instructions:
+
+    ```python
+    def _check_feature_available() -> None:
+        if not FEATURE_AVAILABLE:
+            raise ImportError(
+                "Feature dependencies are not installed. "
+                "Install them with: uv pip install 'blockether-foundation[feature_name]'"
+            )
+    ```
+
+    Call this in `__init__` methods and functions that require the optional dependencies.
+
+### 5. Always use `uv` for dependency management
+
+    This project uses `uv` for Python package management. Always use `uv` commands instead of `pip`:
+
+    ```bash
+    # Install all dependencies including optional extras for development
+    uv sync --all-extras
+
+    # Install specific optional dependency group
+    uv pip install 'blockether-foundation[feature_name]'
+
+    # Update dependencies
+    uv sync
+
+    # Add a new dependency
+    uv add package-name
+    ```
+
+    **Why:** `uv` is significantly faster than `pip` and provides better dependency resolution, especially for projects with optional dependencies and dev extras.

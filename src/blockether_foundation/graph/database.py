@@ -85,11 +85,18 @@ class QueryResult[T]:
 class GraphDatabase:
     """In-memory graph database with Tantivy search."""
 
-    def __init__(self) -> None:
-        """Initialize graph database."""
+    def __init__(self, tantivy_index_path: str | Path | None = None) -> None:
+        """Initialize graph database.
+
+        Args:
+            tantivy_index_path: Path to store Tantivy index on disk. If None, index is in-memory only.
+        """
         self._index: GraphIndex = GraphIndex()
         self._tantivy_index: Any | None = None  # Lazy-loaded Tantivy index (optional)
         self._tantivy_searcher: Any | None = None  # Cache searcher (optional)
+        self._tantivy_index_path: Path | None = (
+            Path(tantivy_index_path) if tantivy_index_path else None
+        )
 
     @property
     def index(self) -> GraphIndex:
@@ -360,11 +367,6 @@ class GraphDatabase:
             ValueError: If entities referenced in operations don't exist.
             TypeError: If operations is not an LLMGraphOperations instance.
         """
-        # Type validation
-        if not isinstance(operations, LLMGraphOperations):
-            raise TypeError(f"Expected LLMGraphOperations, got {type(operations).__name__}")
-
-        # Trigger normalization by accessing ops (handles duplicate edges).
         operations_list: list[
             LLMGraphAddEntity
             | LLMGraphUpdateEntity
@@ -470,18 +472,18 @@ class GraphDatabase:
         rel_ids = self._index.relationships_by_type.get(relationship_type, set())
         return [self._index.relationship_by_id[rid] for rid in rel_ids]
 
-    def find_entities_by_name_pattern(self, pattern: str, exact: bool = True) -> list[Entity]:
-        """Find entities by name pattern using prefix index.
+    def find_entities_by_name_pattern(
+        self, pattern: str, exact: bool = True, top_k: int = 20
+    ) -> list[Entity]:
+        """Find entities by name pattern.
 
         Args:
             pattern: Name pattern to match.
-            exact: If True, exact match; otherwise prefix match.
+            exact: If True, exact match; otherwise substring/prefix match using search.
 
         Returns:
             List of entities matching the name pattern.
         """
-        pattern_lower = pattern.lower()
-
         if exact:
             # Exact match - use name mapping
             entity_id = self._index.entity_by_name.get(pattern)
@@ -490,17 +492,9 @@ class GraphDatabase:
                 return [entity] if entity else []
             return []
         else:
-            # Prefix match - use name prefix index
-            matching_ids: set[str] = set()
-            for prefix, entity_ids in self._index.entities_by_name_prefix.items():
-                if prefix.startswith(pattern_lower):
-                    matching_ids.update(entity_ids)
-
-            return [
-                self._index.entity_by_id[eid]
-                for eid in matching_ids
-                if eid in self._index.entity_by_id
-            ]
+            # Use broader search query that matches both name and content
+            search_results = self.search(pattern, top_k=top_k)
+            return [entity for entity, _ in search_results]
 
     def find_entities_by_timerange(
         self,
@@ -644,8 +638,13 @@ class GraphDatabase:
         # Create fresh searcher for each search
         searcher = self._tantivy_index.searcher()
 
-        # Create query and search
-        tantivy_query = self._tantivy_index.parse_query(query, ["content"])
+        # Escape special characters in query to prevent Tantivy parsing errors
+        special_chars = {"-", ":"}
+        if any(char in query for char in special_chars):
+            escaped_query = "".join(f"\\{c}" if c in special_chars else c for c in query)
+        else:
+            escaped_query = query
+        tantivy_query = self._tantivy_index.parse_query(escaped_query, ["content"])
         results = searcher.search(tantivy_query, limit=top_k)
 
         # Map results back to entities
@@ -790,8 +789,12 @@ class GraphDatabase:
 
         return query
 
-    def _initialize_tantivy_index(self) -> None:
-        """Initialize Tantivy index with current entities."""
+    def _initialize_tantivy_index(self, force_rebuild: bool = False) -> None:
+        """Initialize Tantivy index with current entities.
+
+        Args:
+            force_rebuild: If True, rebuild index even if it exists on disk.
+        """
         entities = list(self._index.entity_by_id.values())
 
         if not entities:
@@ -807,8 +810,34 @@ class GraphDatabase:
         schema_builder.add_text_field("type", stored=True)
         schema = schema_builder.build()
 
-        # Create index
-        self._tantivy_index = tantivy.Index(schema)
+        # Create index - either in-memory or on disk
+        if self._tantivy_index_path:
+            # Create directory if it doesn't exist
+            self._tantivy_index_path.mkdir(parents=True, exist_ok=True)
+
+            # Try to open existing index on disk
+            if not force_rebuild and self._tantivy_index_path.exists():
+                try:
+                    # Try to open existing index
+                    self._tantivy_index = tantivy.Index(schema, path=str(self._tantivy_index_path))
+                    index = cast(Any, self._tantivy_index)
+                    # Check if index has documents
+                    searcher = index.searcher()
+                    if searcher.num_docs() > 0:
+                        # Index exists and has documents, use it
+                        self._tantivy_searcher = searcher
+                        return
+                    # Index exists but is empty, rebuild it
+                except Exception:
+                    # Failed to open existing index, rebuild it
+                    pass
+
+            # Create new index on disk
+            self._tantivy_index = tantivy.Index(schema, path=str(self._tantivy_index_path))
+        else:
+            # In-memory index
+            self._tantivy_index = tantivy.Index(schema)
+
         index = cast(Any, self._tantivy_index)
 
         # Add all entities to the index
@@ -911,83 +940,97 @@ class GraphDatabase:
         """Serialize graph to dictionary.
 
         Returns:
-            Dictionary with entities, relationships, and search index.
+            Dictionary with GraphIndex data and Tantivy index path.
+            The Tantivy index is rebuilt from entities on deserialization.
         """
         return {
-            "entities": [e.to_dict() for e in self._index.entity_by_id.values()],
-            "relationships": [r.to_dict() for r in self._index.relationship_by_id.values()],
             "index": self._index.to_dict(),
-            "search_index_initialized": self._tantivy_index is not None,
+            "tantivy_index_path": str(self._tantivy_index_path)
+            if self._tantivy_index_path
+            else None,
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, object]) -> GraphDatabase:
+    def from_dict(
+        cls, data: dict[str, object], tantivy_index_path: str | Path | None = None
+    ) -> GraphDatabase:
         """Deserialize graph from dictionary.
 
         Args:
             data: Dictionary with entities, relationships, and search index.
+            tantivy_index_path: Path to store/load Tantivy index on disk.
+                               If None, uses saved path from data.
 
         Returns:
             Completely restored GraphDatabase with all entities, relationships,
             and fully functional Tantivy search index.
         """
-        db = cls()
+        # Use saved Tantivy index path if available and no override provided
+        if tantivy_index_path is None:
+            saved_path = data.get("tantivy_index_path")
+            if isinstance(saved_path, str):
+                tantivy_index_path = saved_path
 
-        # Try to restore from index first (more efficient)
+        db = cls(tantivy_index_path=tantivy_index_path)
+
+        # Restore GraphIndex from saved data
         index_data = data.get("index")
         if index_data and isinstance(index_data, dict):
-            # Restore GraphIndex from saved data
             db._index = GraphIndex.from_dict(cast(dict[str, Any], index_data))
 
-            # Extract entities and relationships from the restored index
-            entities = list(db._index.entity_by_id.values())
-        else:
-            # Fallback to the old approach - restore entities from the entities list
-            entities: list[Entity] = []
-            entities_data = data.get("entities", [])
-            if isinstance(entities_data, list):
-                for entity_data in entities_data:  # type: ignore[assignment]
-                    entity_data_dict = cast(dict[str, Any], entity_data)
-                    entity = Entity.from_dict(entity_data_dict)
-                    entities.append(entity)
-                    # Add to GraphIndex directly (without triggering Tantivy indexing)
-                    db._index.add_entity(entity)
-
-            # Restore relationships
-            relationships_data = data.get("relationships", [])
-            if isinstance(relationships_data, list):
-                for rel_data in relationships_data:  # type: ignore[assignment]
-                    rel_data_dict = cast(dict[str, Any], rel_data)
-                    relationship = Relationship.from_dict(rel_data_dict)
-                    # Use GraphIndex.add_relationship to maintain consistency
-                    db._index.add_relationship(relationship)
-
-        # Rebuild Tantivy search index if it was originally initialized
-        if data.get("search_index_initialized", False) and entities:
-            # Initialize Tantivy index with entities (this creates the index and adds all entities)
+        # Rebuild Tantivy search index from restored entities
+        # This creates the index and adds all entities for full-text search capability
+        if db._index.entity_by_id:
             db._initialize_tantivy_index()
-            # Don't add entities again since _initialize_tantivy_index already adds them when there are entities
 
         return db
 
-    def save_to_file(self, file_path: str | Path) -> None:
+    def save_to_file(
+        self,
+        file_path: str | Path,
+        save_tantivy_index: bool = True,
+        tantivy_index_path: str | Path | None = None,
+    ) -> None:
         """Save graph database to JSON file.
 
         Args:
-            file_path: Path to the file where the graph should be saved.
+            file_path: Path to the JSON file where the graph should be saved.
+            save_tantivy_index: If True and using disk-based index, ensures index is saved.
+            tantivy_index_path: Path for Tantivy index. If None and using disk-based index,
+                                defaults to file_path + '.tantivy_index'.
         """
         path = Path(file_path)
         path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Set Tantivy index path if provided and we don't have one
+        if tantivy_index_path and not self._tantivy_index_path:
+            self._tantivy_index_path = Path(tantivy_index_path)
+
+        # Ensure Tantivy index is saved if we have a disk-based index
+        if save_tantivy_index and self._tantivy_index and self._tantivy_index_path:
+            # Force commit any pending changes
+            try:
+                index = cast(Any, self._tantivy_index)
+                writer = index.writer()
+                writer.commit()
+                writer.wait_merging_threads()
+                index.reload()
+            except Exception:
+                pass  # Ignore save errors
 
         with path.open("w") as f:
             json.dump(self.to_dict(), f, indent=2, default=str)
 
     @classmethod
-    def load_from_file(cls, file_path: str | Path) -> GraphDatabase:
+    def load_from_file(
+        cls, file_path: str | Path, tantivy_index_path: str | Path | None = None
+    ) -> GraphDatabase:
         """Load graph database from JSON file.
 
         Args:
-            file_path: Path to the file to load the graph from.
+            file_path: Path to the JSON file to load the graph from.
+            tantivy_index_path: Path to store/load Tantivy index on disk.
+                               If None, defaults to file_path + '.tantivy_index'.
 
         Returns:
             GraphDatabase instance loaded from file.
@@ -1000,10 +1043,14 @@ class GraphDatabase:
         if not path.exists():
             raise FileNotFoundError(f"Graph file not found: {file_path}")
 
+        # Auto-generate Tantivy index path if not provided
+        if tantivy_index_path is None:
+            tantivy_index_path = path.with_suffix(".tantivy_index")
+
         with path.open("r") as f:
             data = json.load(f)
 
-        return cls.from_dict(data)
+        return cls.from_dict(data, tantivy_index_path=tantivy_index_path)
 
     @property
     def entity_count(self) -> int:
@@ -1197,6 +1244,16 @@ class GraphDatabase:
             "density": density,
         }
 
+    def export_to_html(
+        self,
+        output_path: str | Path,
+        title: str = "Knowledge Graph",
+    ) -> Path:
+        """Export graph to interactive HTML with D3.js visualization."""
+        from blockether_foundation.graph.presentation import export_graph_to_html
+
+        return export_graph_to_html(self, output_path, title)
+
 
 class Filter[T](ABC):
     """Base class for all filters."""
@@ -1244,6 +1301,10 @@ class EntityTypeFilter(EntityFilter):
             )
         return DEFAULT_SELECTIVITY
 
+    @override
+    def __repr__(self) -> str:
+        return f"EntityTypeFilter(entity_type='{self.entity_type}')"
+
 
 @dataclass
 class RelationshipTypeFilter(RelationshipFilter):
@@ -1264,6 +1325,10 @@ class RelationshipTypeFilter(RelationshipFilter):
                 len(index.relationship_by_id), MIN_DIVISOR
             )
         return DEFAULT_SELECTIVITY
+
+    @override
+    def __repr__(self) -> str:
+        return f"RelationshipTypeFilter(relationship_type='{self.relationship_type}')"
 
 
 @dataclass
@@ -1295,6 +1360,11 @@ class RelationshipSourceFilter(RelationshipFilter):
     def get_selectivity(self, index: GraphIndex | None = None) -> float:
         return RELATIONSHIP_FILTER_SELECTIVITY
 
+    @override
+    def __repr__(self) -> str:
+        identifier = self.entity_name or self.entity_id
+        return f"RelationshipSourceFilter(source='{identifier}')"
+
 
 @dataclass
 class RelationshipTargetFilter(RelationshipFilter):
@@ -1325,6 +1395,11 @@ class RelationshipTargetFilter(RelationshipFilter):
     def get_selectivity(self, index: GraphIndex | None = None) -> float:
         return RELATIONSHIP_FILTER_SELECTIVITY
 
+    @override
+    def __repr__(self) -> str:
+        identifier = self.entity_name or self.entity_id
+        return f"RelationshipTargetFilter(target='{identifier}')"
+
 
 @dataclass
 class OrFilter(Filter[T]):
@@ -1348,6 +1423,10 @@ class OrFilter(Filter[T]):
         if not self.filters:
             return ZERO_SELECTIVITY
         return max(f.get_selectivity(index) for f in self.filters)
+
+    @override
+    def __repr__(self) -> str:
+        return f"OrFilter({len(self.filters)} filters)"
 
 
 class EntityQuery:
@@ -1457,6 +1536,10 @@ class EntityQuery:
                 return len(self.search_ids) / max(
                     len(index.entity_by_id) if index else MIN_DIVISOR, MIN_DIVISOR
                 )
+
+            @override
+            def __repr__(self) -> str:
+                return f"SearchFilter(matches={len(self.search_ids)} entities)"
 
         search_filter = SearchFilter(search_ids)
         self.filters.append(search_filter)

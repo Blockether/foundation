@@ -14,6 +14,7 @@ from agno.workflow import Workflow
 from fastapi import APIRouter, BackgroundTasks, FastAPI
 from fastapi.testclient import TestClient
 
+from blockether_foundation.asr.common import AudioTranscriberProtocol
 from blockether_foundation.os.interfaces.telegram import handlers
 from blockether_foundation.os.interfaces.telegram.models import BotConfig, Update
 
@@ -73,7 +74,11 @@ async def test_run_process_update_sync_on_running_loop(monkeypatch: pytest.Monke
     event = asyncio.Event()
 
     async def fake_process_update_async(
-        update: Update, executor: Agent | Team | Workflow | None, bot_config: BotConfig
+        update: Update,
+        executor: Agent | Team | Workflow | None,
+        bot_config: BotConfig,
+        audio_transcriber: AudioTranscriberProtocol | None = None,
+        use_async_executor: bool = True,
     ) -> None:
         assert update.update_id == TEST_UPDATE_ID
         assert bot_config.name == "test-bot"
@@ -81,7 +86,6 @@ async def test_run_process_update_sync_on_running_loop(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(handlers, "process_update_async", fake_process_update_async)
 
-    # Call from within an active event loop; should schedule task without calling asyncio.run
     handlers._run_process_update_sync(_make_update(), executor=None, bot_config=_make_bot_config())  # type: ignore[attr-defined]
 
     await asyncio.wait_for(event.wait(), timeout=TEST_TIMEOUT)
@@ -92,7 +96,11 @@ def test_run_process_update_sync_without_running_loop(monkeypatch: pytest.Monkey
     called = False
 
     async def fake_process_update_async(
-        update: Update, executor: Agent | Team | Workflow | None, bot_config: BotConfig
+        update: Update,
+        executor: Agent | Team | Workflow | None,
+        bot_config: BotConfig,
+        audio_transcriber: AudioTranscriberProtocol | None = None,
+        use_async_executor: bool = True,
     ) -> None:
         nonlocal called
         called = True
@@ -180,7 +188,10 @@ class DummyExecutor:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def run(self, message: str) -> None:
+    def run(self, message: str, **kwargs: Any) -> None:
+        self.calls.append(message)
+
+    async def arun(self, message: str, **kwargs: Any) -> None:
         self.calls.append(message)
 
 
@@ -189,7 +200,11 @@ class ErrorRaisingExecutor:
         self.calls: list[str] = []
         self.error = error
 
-    def run(self, message: str) -> None:
+    def run(self, message: str, **kwargs: Any) -> None:
+        self.calls.append(message)
+        raise self.error
+
+    async def arun(self, message: str, **kwargs: Any) -> None:
         self.calls.append(message)
         raise self.error
 

@@ -15,6 +15,7 @@ T = TypeVar("T", bound="TimestampMixin")
 
 EntityType = Literal[
     "creature",
+    "person",
     "organization",
     "location",
     "event",
@@ -26,11 +27,25 @@ EntityType = Literal[
     "example",
     "rule",
     "pattern",
+    "mode",
+    "schema",
+    "abbreviation",
+    "reference",
     "memory",
+    "situation",
+    "fact",
 ]
 
 RelationType = Literal[
-    "part_of", "owned_by", "occurs_at", "related_to", "triggers", "originates_from"
+    "part_of",
+    "owned_by",
+    "occurs_at",
+    "related_to",
+    "triggers",
+    "originates_from",
+    "expands_to",
+    "explains",
+    "is_a_fact",
 ]
 
 
@@ -74,7 +89,7 @@ class Entity(TimestampMixin):
     name: str  # Human-readable identifier (unique per type)
     type: EntityType
     content: str | None = None
-    id: str = field(default_factory=lambda: generate_secure_id(size=8))  # Auto-generated secure ID
+    id: str = field(default_factory=lambda: generate_secure_id(size=5))  # Auto-generated secure ID
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -100,17 +115,19 @@ class LLMGraphAddEntity(ChainOfThoughts):
     """Database add entity operation for LLMGraph consumption."""
 
     name: str = Field(
-        description="Human-readable name of the entity. Like full name of the person or the organization, document title, etc."
+        description="Human-readable name of the entity. Plain text only, no emojis or special characters. Concise by default, max 60 characters."
     )
     type: EntityType = Field(description="Type of the entity.")
-    content: str = Field(description="Content or description of the entity.")
+    content: str = Field(
+        description="Content or description of the entity. No markdown, plain text only. Concise by default, max 400 characters."
+    )
     importance: float | None = Field(
         default=None,
         description="Importance score of the entity (0.0 to 1.0). Optional field for prioritization.",
     )
 
     def __post__init__(self) -> None:
-        self.id = generate_secure_id(size=8)
+        self.id = generate_secure_id(size=5)
 
 
 class LLMGraphUpdateEntity(ChainOfThoughts):
@@ -132,13 +149,13 @@ class LLMGraphDeleteEntity(ChainOfThoughts):
 class LLMGraphAddRelationship(ChainOfThoughts):
     """Database add relationship operation for LLMGraph consumption."""
 
-    source_name: str = Field(description="Human-readable name of the source entity.")
-    target_name: str = Field(description="Human-readable name of the target entity.")
-    type: RelationType = Field(description="Type of the relationship.")
-    importance: float | None = Field(
-        default=None,
-        description="Importance score of the relationship (0.0 to 1.0). Optional field for prioritization.",
+    source_name: str = Field(
+        description="Human-readable name of the source entity. SHOULD ALWAYS MATCH AN EXISTING ENTITY or REFERENCE AN ENTITY TO BE CREATED."
     )
+    target_name: str = Field(
+        description="Human-readable name of the target entity. SHOULD ALWAYS MATCH AN EXISTING ENTITY or REFERENCE AN ENTITY TO BE CREATED."
+    )
+    type: RelationType = Field(description="Type of the relationship.")
 
     def __post__init__(self) -> None:
         self.id = f"{self.source_name}_{self.target_name}"

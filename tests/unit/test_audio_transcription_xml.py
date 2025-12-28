@@ -1,14 +1,15 @@
 """Tests for audio transcription XML formatting."""
 
-from datetime import datetime, UTC
-import pytest
+from datetime import UTC, datetime
 
-from blockether_foundation.audio.transcription import (
+from blockether_foundation.asr import (
     TranscriptionResult,
     TranscriptionSegment,
-    Word,
-    format_transcription_for_context
+    TranscriptionSegmentWord,
+    format_transcription_for_context,
 )
+
+EXPECTED_TOTAL_DURATION = 5.0
 
 
 class TestTranscriptionXMLFormatting:
@@ -16,12 +17,8 @@ class TestTranscriptionXMLFormatting:
 
     def test_word_to_xml_dict(self):
         """Test Word to_xml_dict method."""
-        word = Word(
-            word="hello",
-            start=0.0,
-            end=0.5,
-            score=0.95,
-            speaker="Speaker A"
+        word = TranscriptionSegmentWord(
+            word="hello", start=0.0, end=0.5, score=0.95, speaker="Speaker A"
         )
 
         xml_dict = word.to_xml_dict()
@@ -34,12 +31,7 @@ class TestTranscriptionXMLFormatting:
 
     def test_word_to_xml_dict_no_speaker(self):
         """Test Word to_xml_dict method with no speaker."""
-        word = Word(
-            word="test",
-            start=1.0,
-            end=1.3,
-            score=0.98
-        )
+        word = TranscriptionSegmentWord(word="test", start=1.0, end=1.3, score=0.98)
 
         xml_dict = word.to_xml_dict()
 
@@ -48,16 +40,12 @@ class TestTranscriptionXMLFormatting:
     def test_segment_to_xml_dict(self):
         """Test TranscriptionSegment to_xml_dict method."""
         words = [
-            Word(word="Hello", start=0.0, end=0.5, score=0.98),
-            Word(word="world", start=0.5, end=0.9, score=0.95)
+            TranscriptionSegmentWord(word="Hello", start=0.0, end=0.5, score=0.98),
+            TranscriptionSegmentWord(word="world", start=0.5, end=0.9, score=0.95),
         ]
 
         segment = TranscriptionSegment(
-            start=0.0,
-            end=1.0,
-            text="Hello world",
-            words=words,
-            speaker="Speaker A"
+            start=0.0, end=1.0, text="Hello world", words=words, speaker="Speaker A"
         )
 
         xml_dict = segment.to_xml_dict()
@@ -76,23 +64,23 @@ class TestTranscriptionXMLFormatting:
                 start=0.0,
                 end=2.0,
                 text="First segment",
-                words=[Word(word="First", start=0.0, end=0.5, score=0.98)],
-                speaker="A"
+                words=[TranscriptionSegmentWord(word="First", start=0.0, end=0.5, score=0.98)],
+                speaker="A",
             ),
             TranscriptionSegment(
                 start=2.0,
                 end=4.0,
                 text="Second segment",
-                words=[Word(word="Second", start=2.0, end=2.5, score=0.95)],
-                speaker="B"
-            )
+                words=[TranscriptionSegmentWord(word="Second", start=2.0, end=2.5, score=0.95)],
+                speaker="B",
+            ),
         ]
 
         result = TranscriptionResult(
             segments=segments,
             language="en",
             language_probability=0.99,
-            created_at=datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+            created_at=datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC),
         )
 
         xml_dict = result.to_xml_dict()
@@ -112,30 +100,26 @@ class TestTranscriptionXMLFormatting:
                 start=0.0,
                 end=2.5,
                 text="First",
-                words=[Word(word="First", start=0.0, end=0.5, score=0.98)],
-                speaker="A"
+                words=[TranscriptionSegmentWord(word="First", start=0.0, end=0.5, score=0.98)],
+                speaker="A",
             ),
             TranscriptionSegment(
                 start=3.0,
                 end=5.0,
                 text="Second",
-                words=[Word(word="Second", start=3.0, end=3.5, score=0.95)],
-                speaker="A"
-            )
+                words=[TranscriptionSegmentWord(word="Second", start=3.0, end=3.5, score=0.95)],
+                speaker="A",
+            ),
         ]
 
-        result = TranscriptionResult(
-            segments=segments,
-            language="en",
-            language_probability=0.99
-        )
+        result = TranscriptionResult(segments=segments, language="en", language_probability=0.99)
 
         # Test text property
         assert result.text == "First Second"
 
         # Test total_duration property
         # The actual duration should be from min(start) to max(end)
-        assert result.total_duration == 5.0
+        assert result.total_duration == EXPECTED_TOTAL_DURATION
 
         # Test word_count property
         assert result.word_count == 2
@@ -148,10 +132,10 @@ class TestTranscriptionXMLFormatting:
                 end=1.5,
                 text="Hello world",
                 words=[
-                    Word(word="Hello", start=0.0, end=0.5, score=0.98),
-                    Word(word="world", start=0.6, end=1.0, score=0.95)
+                    TranscriptionSegmentWord(word="Hello", start=0.0, end=0.5, score=0.98),
+                    TranscriptionSegmentWord(word="world", start=0.6, end=1.0, score=0.95),
                 ],
-                speaker="A"
+                speaker="A",
             )
         ]
 
@@ -159,7 +143,7 @@ class TestTranscriptionXMLFormatting:
             segments=segments,
             language="en",
             language_probability=0.97,
-            created_at=datetime(2025, 1, 15, 10, 30, 0, tzinfo=UTC)
+            created_at=datetime(2025, 1, 15, 10, 30, 0, tzinfo=UTC),
         )
 
         xml = format_transcription_for_context(result)
@@ -174,36 +158,23 @@ class TestTranscriptionXMLFormatting:
         assert 'word_count="2"' in xml
         assert 'created_at="2025-01-15T10:30:00+00:00"' in xml
         assert 'speaker="A"' in xml
-        assert '<text>Hello world</text>' in xml
+        assert "<text>Hello world</text>" in xml
         assert '<word start="0.000" end="0.500" score="0.980">Hello</word>' in xml
         assert '<word start="0.600" end="1.000" score="0.950">world</word>' in xml
 
     def test_format_transcription_for_context_no_words(self):
         """Test format_transcription_for_context without word timestamps."""
         segments = [
-            TranscriptionSegment(
-                start=0.0,
-                end=2.0,
-                text="No words here",
-                words=[],
-                speaker="B"
-            )
+            TranscriptionSegment(start=0.0, end=2.0, text="No words here", words=[], speaker="B")
         ]
 
-        result = TranscriptionResult(
-            segments=segments,
-            language="es",
-            language_probability=0.85
-        )
+        result = TranscriptionResult(segments=segments, language="es", language_probability=0.85)
 
-        xml = format_transcription_for_context(
-            result,
-            include_word_timestamps=False
-        )
+        xml = format_transcription_for_context(result, include_word_timestamps=False)
 
-        assert '>No words here</segment>' in xml
-        assert '<words>' not in xml
-        assert '<word ' not in xml
+        assert ">No words here</segment>" in xml
+        assert "<words>" not in xml
+        assert "<word " not in xml
 
     def test_format_transcription_for_context_truncated(self):
         """Test format_transcription_for_context with truncated content."""
@@ -213,40 +184,24 @@ class TestTranscriptionXMLFormatting:
                 end=3.0,
                 text="This is a very long segment that should be truncated",
                 words=[],
-                speaker="C"
+                speaker="C",
             ),
             TranscriptionSegment(
-                start=3.0,
-                end=5.0,
-                text="This should not appear",
-                words=[],
-                speaker="D"
-            )
+                start=3.0, end=5.0, text="This should not appear", words=[], speaker="D"
+            ),
         ]
 
-        result = TranscriptionResult(
-            segments=segments,
-            language="fr",
-            language_probability=0.90
-        )
+        result = TranscriptionResult(segments=segments, language="fr", language_probability=0.90)
 
-        xml = format_transcription_for_context(
-            result,
-            max_segment_content=20,
-            max_segments=1
-        )
+        xml = format_transcription_for_context(result, max_segment_content=20, max_segments=1)
 
-        assert '>This is a very long ...</segment>' in xml
-        assert 'This should not appear' not in xml
+        assert ">This is a very long ...</segment>" in xml
+        assert "This should not appear" not in xml
         assert 'index="2"' not in xml
 
     def test_format_transcription_for_context_empty(self):
         """Test format_transcription_for_context with empty transcription."""
-        result = TranscriptionResult(
-            segments=[],
-            language="unknown",
-            language_probability=0.0
-        )
+        result = TranscriptionResult(segments=[], language="unknown", language_probability=0.0)
 
         xml = format_transcription_for_context(result)
 
@@ -262,23 +217,19 @@ class TestTranscriptionXMLFormatting:
             TranscriptionSegment(
                 start=0.0,
                 end=2.0,
-                text="Text with <special> & \"quoted\" characters",
+                text='Text with <special> & "quoted" characters',
                 words=[],
-                speaker="Speaker & Test"
+                speaker="Speaker & Test",
             )
         ]
 
-        result = TranscriptionResult(
-            segments=segments,
-            language="en",
-            language_probability=0.95
-        )
+        result = TranscriptionResult(segments=segments, language="en", language_probability=0.95)
 
         xml = format_transcription_for_context(result)
 
         # Check that special characters are escaped
-        assert '&lt;special&gt;' in xml
-        assert '&amp;' in xml
+        assert "&lt;special&gt;" in xml
+        assert "&amp;" in xml
         # Note: escape() escapes < > & in text content, and also quotes in attributes
         assert 'speaker="Speaker &amp; Test"' in xml
         assert '>Text with &lt;special&gt; &amp; "quoted" characters</segment>' in xml

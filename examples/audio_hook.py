@@ -7,7 +7,8 @@ from agno.agent import Agent
 from agno.media import Audio
 from agno.models.openai import OpenAIChat
 
-from blockether_foundation.agents.hooks.audio import AudioHooksConfig
+from blockether_foundation.agents.hooks import TranscriptionHooksConfig
+from blockether_foundation.asr import LocalWhisperAudioTranscriber
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,9 +35,10 @@ blockether_model = OpenAIChat(
 
 
 async def main():
-    """Run the audio transcription example."""
-    # Create an agent with the transcription hook
-    config = AudioHooksConfig(effort=0.5)
+    """Run audio transcription example."""
+    # Create an agent with transcription hook
+    transcriber = LocalWhisperAudioTranscriber(model_id="tiny")
+    config = TranscriptionHooksConfig(transcriber=transcriber, effort=0.5)
     agent = Agent(
         model=blockether_model,
         description="You are a helpful assistant that can understand audio.",

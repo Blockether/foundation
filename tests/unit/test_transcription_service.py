@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 
-from blockether_foundation.audio.transcription import AudioTranscriber
+from blockether_foundation.asr import LocalWhisperAudioTranscriber
 
 # Path to sample.ogg in test resources
 SAMPLE_AUDIO_PATH = os.path.join(os.path.dirname(__file__), "../test-resources/sample.ogg")
@@ -31,36 +31,27 @@ class Info(NamedTuple):
 
 
 @pytest.mark.unit
-def test_singleton_instance() -> None:
-    # Reset singleton
-    AudioTranscriber._instance = None  # type: ignore
-
-    instance1 = AudioTranscriber.get_instance()
-    instance2 = AudioTranscriber.get_instance()
-
-    assert instance1 is instance2
-    assert isinstance(instance1, AudioTranscriber)
+def test_default_model_is_turbo() -> None:
+    """Test that default model is turbo."""
+    instance = LocalWhisperAudioTranscriber()
+    assert instance.model_id == "turbo"
 
 
-@patch.dict(os.environ, {"BLOCKETHER_WHISPER_MODEL": "tiny"})
 @pytest.mark.unit
-def test_singleton_configuration() -> None:
-    # Reset singleton
-    AudioTranscriber._instance = None  # type: ignore
-
-    instance = AudioTranscriber.get_instance()
+def test_custom_model_configuration() -> None:
+    """Test custom model configuration."""
+    instance = LocalWhisperAudioTranscriber(model_id="tiny")
     assert instance.model_id == "tiny"
 
 
-@patch.dict(os.environ, {"BLOCKETHER_WHISPER_MODEL": "invalid_model"})
 @pytest.mark.unit
-def test_invalid_model_handling() -> None:
-    # Reset singleton
-    AudioTranscriber._instance = None  # type: ignore
+def test_custom_model_with_valid_whisper_model_name() -> None:
+    """Test various valid Whisper model names."""
+    valid_models = ["tiny", "base", "small", "medium", "large-v3", "large-v2", "turbo", "distil-large-v3"]
 
-    instance = AudioTranscriber.get_instance()
-    # Should fallback to "turbo" as per implementation
-    assert instance.model_id == "turbo"
+    for model_name in valid_models:
+        instance = LocalWhisperAudioTranscriber(model_id=model_name)  # type: ignore[arg-type]
+        assert instance.model_id == model_name
 
 
 @pytest.mark.skipif(
@@ -70,56 +61,48 @@ def test_invalid_model_handling() -> None:
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_transcription_sample_ogg():
-    # Reset singleton to ensure clean state
-    AudioTranscriber._instance = None  # type: ignore
+    """Test transcription with sample.ogg using mocked WhisperModel."""
+    with patch("blockether_foundation.asr.local_whisper.WhisperModel") as MockModel:
+        mock_model_instance = MockModel.return_value
+        # Mock the transcribe return value
 
-    # Use a smaller model for testing to be faster
-    with patch.dict(os.environ, {"BLOCKETHER_WHISPER_MODEL": "tiny"}):
-        with patch("blockether_foundation.audio.transcription.WhisperModel") as MockModel:
-            mock_model_instance = MockModel.return_value
-            # Mock the transcribe return value
+        # Mock segments with words
+        mock_words = [
+            Word("1,", 0.0, 0.5, 0.99),
+            Word("2,", 0.5, 1.0, 0.99),
+            Word("3,", 1.0, 1.5, 0.99),
+            Word("4,", 1.5, 2.0, 0.99),
+            Word("5.", 2.0, 2.5, 0.99),
+        ]
+        mock_segment = Segment("1, 2, 3, 4, 5.", 0.0, 2.5, mock_words)
+        mock_model_instance.transcribe.return_value = (
+            iter([mock_segment]),
+            Info("en", 0.99),
+        )
 
-            # Mock segments with words
-            mock_words = [
-                Word("1,", 0.0, 0.5, 0.99),
-                Word("2,", 0.5, 1.0, 0.99),
-                Word("3,", 1.0, 1.5, 0.99),
-                Word("4,", 1.5, 2.0, 0.99),
-                Word("5.", 2.0, 2.5, 0.99),
-            ]
-            mock_segment = Segment("1, 2, 3, 4, 5.", 0.0, 2.5, mock_words)
-            mock_model_instance.transcribe.return_value = (
-                iter([mock_segment]),
-                Info("en", 0.99),
-            )
+        transcriber = LocalWhisperAudioTranscriber(model_id="tiny")
 
-            transcriber = AudioTranscriber.get_instance()
+        with open(SAMPLE_AUDIO_PATH, "rb") as f:
+            audio_data = f.read()
 
-            with open(SAMPLE_AUDIO_PATH, "rb") as f:
-                audio_data = f.read()
+        result = await transcriber.transcribe(audio_data)
 
-            result = await transcriber.transcribe(audio_data)
-
-            # Verify result
-            assert result is not None
-            assert result.text == "1, 2, 3, 4, 5."
+        # Verify result
+        assert result is not None
+        assert result.text == "1, 2, 3, 4, 5."
 
 
-@patch.dict(os.environ, {"BLOCKETHER_WHISPER_MODEL": "distil-large-v3"})
 @pytest.mark.unit
 def test_distil_model_support() -> None:
     """Test that distil-large-v3 model is supported."""
-    # Reset singleton
-    AudioTranscriber._instance = None  # type: ignore
-
-    instance = AudioTranscriber.get_instance()
+    instance = LocalWhisperAudioTranscriber(model_id="distil-large-v3")
     assert instance.model_id == "distil-large-v3"
 
 
 @pytest.mark.unit
 def test_unload_model() -> None:
     """Test model unloading functionality."""
-    transcriber = AudioTranscriber(model_id="tiny")
+    transcriber = LocalWhisperAudioTranscriber(model_id="tiny")
 
     # Initially no model is loaded
     assert getattr(transcriber, "_model", None) is None
@@ -132,7 +115,7 @@ def test_unload_model() -> None:
 @pytest.mark.unit
 async def test_transcribe_empty_audio() -> None:
     """Test transcription with empty audio data."""
-    transcriber = AudioTranscriber(model_id="tiny")
+    transcriber = LocalWhisperAudioTranscriber(model_id="tiny")
 
     # Empty bytes should return None
     result = await transcriber.transcribe(b"")
@@ -143,7 +126,7 @@ async def test_transcribe_empty_audio() -> None:
 @pytest.mark.unit
 async def test_transcribe_error_handling() -> None:
     """Test transcription error handling with invalid audio data."""
-    transcriber = AudioTranscriber(model_id="tiny")
+    transcriber = LocalWhisperAudioTranscriber(model_id="tiny")
 
     # Invalid audio data that should cause an error
     invalid_audio = b"This is not valid audio data at all!"
@@ -156,7 +139,7 @@ async def test_transcribe_error_handling() -> None:
 @pytest.mark.unit
 def test_model_already_loaded() -> None:
     """Test that load_model returns existing model if already loaded."""
-    transcriber = AudioTranscriber(model_id="tiny")
+    transcriber = LocalWhisperAudioTranscriber(model_id="tiny")
 
     # First load should create the model
     model1 = transcriber.load_model()
@@ -170,7 +153,7 @@ def test_model_already_loaded() -> None:
 @pytest.mark.unit
 def test_model_never_unloads() -> None:
     """Test that the model never unloads after transcription for maximum performance."""
-    transcriber = AudioTranscriber(model_id="tiny")
+    transcriber = LocalWhisperAudioTranscriber(model_id="tiny")
 
     # Create a mock model
     mock_model = Mock()
@@ -185,8 +168,8 @@ def test_model_never_unloads() -> None:
     transcriber._model = mock_model
 
     # Mock av.open and audio processing
-    with patch("blockether_foundation.audio.transcription.av.open"):
-        with patch("blockether_foundation.audio.transcription.np.concatenate") as mock_concat:
+    with patch("blockether_foundation.asr.local_whisper.av.open"):
+        with patch("blockether_foundation.asr.local_whisper.np.concatenate") as mock_concat:
             mock_concat.return_value = np.array([0.0] * 16000, dtype=np.float32)
 
             # Call _run_whisper_inference - model should stay loaded
@@ -205,14 +188,14 @@ def test_device_auto_selection() -> None:
     """Test automatic device selection."""
     # Test with CUDA available
     with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0"}):
-        transcriber = AudioTranscriber()
+        transcriber = LocalWhisperAudioTranscriber()
         assert transcriber.device == "cuda"
 
     # Test without CUDA (default)
     with patch.dict(os.environ, {}, clear=True):
-        transcriber = AudioTranscriber()
+        transcriber = LocalWhisperAudioTranscriber()
         assert transcriber.device == "cpu"
 
     # Test explicit device override
-    transcriber = AudioTranscriber(device="cpu")
+    transcriber = LocalWhisperAudioTranscriber(device="cpu")
     assert transcriber.device == "cpu"

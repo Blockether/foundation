@@ -4,10 +4,6 @@ import pytest
 from agno.run.agent import RunOutput
 
 from blockether_foundation.agents.hooks.graph import GraphHooksConfig
-from blockether_foundation.utils import (
-    ensure_global_graph,
-    get_global_graph,
-)
 
 from .utils import create_agent_with_adapter
 
@@ -23,7 +19,7 @@ SUMMARY_SCORE_THRESHOLD = 8  # High quality bar
 async def test_graph_hooks_actually_store_data():
     """Test that graph hooks actually extract and store data from the conversation."""
 
-    # Configure hooks to use global graph with async hooks
+    # Configure hooks to use graph with async hooks
     config = GraphHooksConfig(
         agentic_search=False,  # Keep disabled for this test
         agentic_ingestion=True,  # Enable ingestion for this test
@@ -60,18 +56,9 @@ async def test_graph_hooks_actually_store_data():
     # Verify response exists
     assert response.content is not None, "Agent should respond"
 
-    # Get the actual graph databases that hooks should have modified
-    # The global graph is stored on the agent
-    global_db = get_global_graph(agent)
-
-    # For local graph, we need to get it from session_data
-    # Since we can't easily retrieve the session, we'll focus on global graph
-
-    # Note: The hooks only create graphs if use_global=True and entities are extracted
-    # If extraction failed, the graph might not be created
-    # Ensure global graph exists for testing
-    global_db = ensure_global_graph(agent)
-    assert global_db is not None, "Global graph database should exist after ensuring"
+    # Get the graph database from the config (new API - no more global session storage)
+    graph_db = config.graph
+    assert graph_db is not None, "Graph database should exist in config"
 
     # The hook ran without crashing (we can see this in the logs)
     # The extraction is happening but may not be properly formatted for the graph database

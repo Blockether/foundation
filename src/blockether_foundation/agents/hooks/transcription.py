@@ -1,11 +1,10 @@
-"""Audio transcription hooks for Agno agents."""
+"""Transcription hooks for Agno agents."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any
 
 from agno.agent.agent import Agent
 from agno.media import Audio
@@ -14,41 +13,17 @@ from agno.session import AgentSession, TeamSession
 from agno.team import Team
 from agno.utils.log import log_debug, log_warning  # type: ignore
 
-from ...audio.transcription import (
-    AudioTranscriber,
+from ...asr import (
     TranscriptionResult,
-    WhisperModelName,
     format_transcription_for_context,
 )
 from ...utils import (
-    DebugMode,
-    UserId,
-    build_agent_context,
+    AgnoPreHook,
     save_data_to_json_file,
 )
 
-# Type aliases for hook functions
-AudioHookType = Callable[
-    [
-        Agent | Team,
-        RunInput,
-        AgentSession | TeamSession,
-        UserId,
-        DebugMode,
-    ],
-    Any,
-]
-
-
-# Common functions for both sync and async hooks
-def _get_audio_transcriber(model: str | None) -> AudioTranscriber:
-    """Get audio transcriber instance with optional custom model."""
-    if model:
-        # Create custom transcriber with specified model, casting to WhisperModelName
-        return AudioTranscriber(model_id=cast(WhisperModelName, model), auto_assign_instance=False)
-    else:
-        # Use default singleton instance
-        return AudioTranscriber.get_instance()
+if TYPE_CHECKING:
+    from ...asr import AudioTranscriberProtocol
 
 
 def _prepare_transcription_data(
@@ -145,13 +120,14 @@ def _format_and_inject_transcripts(
     run_input.audios = []
 
 
-async def _transcribe_audio_file_async(
-    transcriber: AudioTranscriber,
+async def _transcribe_audio_file(
+    transcriber: AudioTranscriberProtocol,
     audio_file: Audio,
     language: str | None,
     effort: float,
+    async_hooks: bool = True,
 ) -> TranscriptionResult | None:
-    """Transcribe a single audio file asynchronously."""
+    """Transcribe a single audio file."""
     # Handle both content and filepath
     if audio_file.content:
         # Use audio content directly
@@ -175,60 +151,20 @@ async def _transcribe_audio_file_async(
 
     log_debug(f"Transcribing audio from: {source_desc}")
 
-    result: TranscriptionResult | None = await transcriber.transcribe(
-        audio_bytes,
-        language=language,
-        effort=effort,
-    )
-
-    if not result or not result.segments:
-        log_debug(f"No transcription result for {source_desc}")
-        return None
-
-    log_debug(
-        f"Successfully transcribed audio from {source_desc} (length: {len(result.text)} chars)"
-    )
-
-    return result
-
-
-def _transcribe_audio_file_sync(
-    transcriber: AudioTranscriber,
-    audio_file: Audio,
-    language: str | None,
-    effort: float,
-) -> TranscriptionResult | None:
-    """Transcribe a single audio file synchronously."""
-    # Handle both content and filepath
-    if audio_file.content:
-        # Use audio content directly
-        audio_bytes = audio_file.content
-        source_desc = f"audio content ({audio_file.id})"
-    elif audio_file.filepath:
-        # Try to read from file
-        try:
-            with open(audio_file.filepath, "rb") as f:
-                audio_bytes = f.read()
-            source_desc = str(audio_file.filepath)
-        except (FileNotFoundError, OSError):
-            log_debug(f"Audio file not found: {audio_file.filepath}")
-            return None
+    if async_hooks:
+        result: TranscriptionResult | None = asyncio.run(
+            transcriber.transcribe(
+                audio_bytes,
+                language=language,
+                effort=effort,
+            )
+        )
     else:
-        if isinstance(audio_file, Audio) and audio_file.filepath:
-            log_debug(f"No valid audio source found for: {audio_file.filepath}")
-        else:
-            log_debug("No valid audio source found for audio file")
-        return None
-
-    log_debug(f"Transcribing audio from: {source_desc}")
-
-    result: TranscriptionResult | None = asyncio.run(
-        transcriber.transcribe(
+        result: TranscriptionResult | None = await transcriber.transcribe(
             audio_bytes,
             language=language,
             effort=effort,
         )
-    )
 
     if not result or not result.segments:
         log_debug(f"No transcription result for {source_desc}")
@@ -266,12 +202,12 @@ async def _save_transcription_to_file(
     save_data_to_json_file(transcription_data, output_file)
 
 
-class AudioHooksConfig:
-    """Configuration for audio transcription hooks."""
+class TranscriptionHooksConfig:
+    """Configuration for transcription hooks."""
 
     def __init__(
         self,
-        model: str | None = None,
+        transcriber: AudioTranscriberProtocol,
         language: str | None = None,
         save_transcriptions: bool = False,
         transcription_dir: str | None = None,
@@ -279,7 +215,7 @@ class AudioHooksConfig:
         max_segments: int | None = None,
         effort: float = 1.0,
     ):
-        self.model = model
+        self.transcriber = transcriber
         self.language = language
         self.save_transcriptions = save_transcriptions
         self.transcription_dir = transcription_dir
@@ -287,58 +223,60 @@ class AudioHooksConfig:
         self.max_segments = max_segments
         self.effort = effort
 
-    def pre_hook(self) -> AudioHookType:
-        """Get the pre-hook for audio transcription.
+    def pre_hook(self) -> AgnoPreHook:
+        """Get the pre-hook for transcription.
 
         Returns:
             Pre-hook function configured with this config's settings
         """
-        if self.async_hooks:
-            return _create_async_audio_transcription_hook(
-                model=self.model,
-                language=self.language,
-                save_transcriptions=self.save_transcriptions,
-                transcription_dir=self.transcription_dir,
-                max_segments=self.max_segments,
-                effort=self.effort,
-            )
-        else:
-            return _create_sync_audio_transcription_hook(
-                model=self.model,
-                language=self.language,
-                save_transcriptions=self.save_transcriptions,
-                transcription_dir=self.transcription_dir,
-                max_segments=self.max_segments,
-                effort=self.effort,
-            )
+        return _create_transcription_hook(
+            transcriber=self.transcriber,
+            language=self.language,
+            save_transcriptions=self.save_transcriptions,
+            transcription_dir=self.transcription_dir,
+            max_segments=self.max_segments,
+            effort=self.effort,
+            async_hooks=not self.async_hooks,
+        )
 
 
-def _create_async_audio_transcription_hook(
-    model: str | None,
+def _create_transcription_hook(
+    transcriber: AudioTranscriberProtocol,
     language: str | None,
     save_transcriptions: bool,
     transcription_dir: str | None,
     max_segments: int | None,
     effort: float,
-) -> AudioHookType:
-    """Create async audio transcription hook."""
+    async_hooks: bool = True,
+) -> AgnoPreHook:
+    """Create transcription hook.
 
-    async def hook(
+    Args:
+        transcriber: Optional audio transcriber instance
+        language: Optional language code for transcription
+        save_transcriptions: Whether to save transcriptions to files
+        transcription_dir: Directory to save transcriptions
+        max_segments: Maximum number of segments to include
+        effort: Transcription effort level (0.0-1.0)
+        async_hooks: If True, returns a sync hook that runs async logic synchronously
+
+    Returns:
+        Hook function (async or sync based on async_hooks parameter)
+    """
+
+    async def hook_logic(
         agent: Agent | Team,
         run_input: RunInput,
         session: AgentSession | TeamSession,
         user_id: str | None,
         debug_mode: bool | None,
     ) -> None:
-        """Async hook implementation for audio transcription."""
+        """Shared hook implementation for transcription."""
         if not run_input.audios:
             log_debug("No audio files to transcribe")
             return
 
         log_debug(f"Processing {len(run_input.audios)} audio(s) for transcription")
-
-        # Get audio transcriber using common function
-        transcriber = _get_audio_transcriber(model)
 
         try:
             # Transcribe all audio files
@@ -346,9 +284,9 @@ def _create_async_audio_transcription_hook(
             audio_files = run_input.audios or []
 
             for audio_file in audio_files:
-                # Transcribe audio file using common async function
-                result = await _transcribe_audio_file_async(
-                    transcriber, audio_file, language, effort
+                # Transcribe audio file using shared function
+                result = await _transcribe_audio_file(
+                    transcriber, audio_file, language, effort, async_hooks=async_hooks
                 )
                 if result:
                     # Save transcription if configured
@@ -358,98 +296,45 @@ def _create_async_audio_transcription_hook(
                             if audio_file.filepath
                             else f"audio_{audio_file.id}"
                         )
-                        await _save_transcription_to_file(
-                            result,
-                            source_path,
-                            transcription_dir,
-                        )
-                    transcripts.append(result)
-
-            # Format and inject transcripts using common function (this also clears audio files)
-            if transcripts:
-                # Optionally add agent context to improve transcription relevance
-                agent_context = build_agent_context(agent)
-                if agent_context:
-                    log_debug("Agent context available for transcription enhancement")
-
-            _format_and_inject_transcripts(run_input, transcripts, max_segments)
-
-        except Exception as e:
-            log_warning(f"Audio transcription failed: {e}")
-            # Still clear audio files even on error
-            run_input.audios = []
-
-        log_debug("Audio transcription hook completed")
-
-    return hook
-
-
-def _create_sync_audio_transcription_hook(
-    model: str | None,
-    language: str | None,
-    save_transcriptions: bool,
-    transcription_dir: str | None,
-    max_segments: int | None,
-    effort: float,
-) -> AudioHookType:
-    """Create sync audio transcription hook."""
-
-    def hook(
-        agent: Agent | Team,
-        run_input: RunInput,
-        session: AgentSession | TeamSession,
-        user_id: str | None,
-        debug_mode: bool | None,
-    ) -> None:
-        """Sync hook implementation for audio transcription."""
-        if not run_input.audios:
-            log_debug("No audio files to transcribe")
-            return
-
-        log_debug(f"Processing {len(run_input.audios)} audio(s) for transcription")
-
-        # Get audio transcriber using common function
-        transcriber = _get_audio_transcriber(model)
-
-        try:
-            # Transcribe all audio files
-            transcripts: list[TranscriptionResult] = []
-            audio_files = run_input.audios or []
-
-            for audio_file in audio_files:
-                # Transcribe audio file using common sync function
-                result = _transcribe_audio_file_sync(transcriber, audio_file, language, effort)
-                if result:
-                    # Save transcription if configured
-                    if save_transcriptions:
-                        source_path = (
-                            str(audio_file.filepath)
-                            if audio_file.filepath
-                            else f"audio_{audio_file.id}"
-                        )
-                        asyncio.run(
-                            _save_transcription_to_file(
+                        # Use asyncio.run for sync saving
+                        if async_hooks:
+                            asyncio.run(
+                                _save_transcription_to_file(
+                                    result,
+                                    source_path,
+                                    transcription_dir,
+                                )
+                            )
+                        else:
+                            await _save_transcription_to_file(
                                 result,
                                 source_path,
                                 transcription_dir,
                             )
-                        )
                     transcripts.append(result)
-
-            # Format and inject transcripts using common function (this also clears audio files)
-            if transcripts:
-                # Optionally add agent context to improve transcription relevance
-                agent_context = build_agent_context(agent)
-                if agent_context:
-                    log_debug("Agent context available for transcription enhancement")
 
             _format_and_inject_transcripts(run_input, transcripts, max_segments)
 
         except Exception as e:
-            log_warning(f"Audio transcription failed: {e}")
+            log_warning(f"Transcription failed: {e}")
             # Still clear audio files even on error
-            run_input.audios = []
 
-        log_debug("Audio transcription hook completed")
+        run_input.audios = []
+        log_debug("Transcription hook completed")
 
-    return hook
+    # Return appropriate hook based on async_hooks parameter
+    if async_hooks:
+
+        def sync_hook(
+            agent: Agent | Team,
+            run_input: RunInput,
+            session: AgentSession | TeamSession,
+            user_id: str | None,
+            debug_mode: bool | None,
+        ) -> None:
+            """Sync wrapper that runs the async hook logic."""
+            asyncio.run(hook_logic(agent, run_input, session, user_id, debug_mode))
+
+        return sync_hook
+    else:
+        return hook_logic

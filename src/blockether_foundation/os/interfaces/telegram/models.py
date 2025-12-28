@@ -1,3 +1,4 @@
+# ignore-development
 """Minimal data models for Telegram interface - only what's needed."""
 
 from typing import Any, Literal
@@ -15,6 +16,7 @@ class BotConfig(BaseModel):
     executor_timeout: int = 30
     allowlist_user_ids: list[str] = []
     denylist_user_ids: list[str] = []
+    use_async_executor: bool = True
 
     @property
     def webhook_url(self) -> str:
