@@ -20,6 +20,7 @@ from blockether_foundation.agents.hooks.consensus.core import (
     RejectedApproach,
     StrengthWeakness,
     SuggestedImprovement,
+    TriageDecision,
 )
 from blockether_foundation.agents.hooks.consensus.presentation import (
     export_consensus_report_to_html,
@@ -46,6 +47,7 @@ __all__ = [
     "RejectedApproach",
     "StrengthWeakness",
     "SuggestedImprovement",
+    "TriageDecision",
     "export_consensus_report_to_html",
     "generate_consensus_report_html",
 ]

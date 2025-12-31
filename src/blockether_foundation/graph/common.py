@@ -37,6 +37,10 @@ RELATIONSHIP_TYPE_DEFINITIONS: dict[str, str] = {
     "explains": "Entity provides rationale or underlying reasons for another e.g. specific situation explaining a behavior; specific concept explaining a rule; specific example illustrating a concept or rule.",
     "causes": "Direct causation, antecedent-consequent relationships.",
     "is_a_fact": "Entity has a specific, verifiable fact associated with it.",
+    "participated_in": "Entity (person/creature) participated in an event, situation, or activity.",
+    "alias_of": "Entity is an alternative name or reference to another entity (used for entity resolution).",
+    "created_by": "Entity was built, made, or authored by another entity.",
+    "located_at": "Entity is situated, resides, or exists at a location.",
 }
 
 

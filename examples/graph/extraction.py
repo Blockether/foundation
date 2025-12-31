@@ -48,8 +48,9 @@ from pathlib import Path
 from agno.agent.agent import Agent
 from agno.models.openai import OpenAIChat
 from agno.utils.log import configure_agno_logging
-
+from blockether_foundation.agents.models.zai import Zhipu
 from blockether_foundation.agents.hooks.graph import GraphHookIterativeConfig, GraphHooksConfig
+from blockether_foundation.graph import GraphDatabase
 
 # Initialize simple logging system
 log_file = f"knowledge_extraction_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -74,8 +75,11 @@ print(
     f"Initializing blockether_model... model_base_url={MODEL_BASE_URL}, model_api_key={MODEL_API_KEY}"
 )
 
-blockether_model = OpenAIChat(
-    id="gpt-5-mini", base_url=MODEL_BASE_URL, api_key=MODEL_API_KEY, modalities=["text"]
+blockether_model = Zhipu(
+    id="glm-4.7",
+    timeout=60000,
+    enable_thinking=True,
+    enable_coding_plan=True,
 )
 
 # =============================================================================
@@ -164,6 +168,22 @@ def format_conversations(
     return "\n".join(all_messages) if all_messages else None
 
 
+def export_graph_to_html(json_path: Path, title: str = "Knowledge Graph") -> Path:
+    """Export the knowledge graph to an interactive HTML visualization.
+
+    Args:
+        json_path: Path to the JSON graph file
+        title: Title for the HTML visualization
+
+    Returns:
+        Path to the generated HTML file
+    """
+    html_path = json_path.with_suffix(".html")
+    graph = GraphDatabase.load_from_file(str(json_path))
+    graph.export_to_html(str(html_path), title=title)
+    return html_path
+
+
 def create_knowledge_agent(
     output_file: Path, partner1: str, partner2: str, logger: logging.Logger | None = None
 ) -> Agent:
@@ -176,16 +196,7 @@ def create_knowledge_agent(
         logger: Optional logger for detailed tracking
     """
     # Configure graph hooks with file persistence and iterative processing
-    iterative_config = GraphHookIterativeConfig(
-        enabled=True,
-        max_iterations=2,
-        quality_threshold=0.75,
-        enable_gap_analysis=True,
-        enable_entity_expansion=True,
-        enable_query_refinement=True,
-        bfs_expansion_depth=2,
-        max_entities_to_expand=5,
-    )
+    iterative_config = GraphHookIterativeConfig(max_queries=2, max_query_retries=3)
 
     # GraphHooksConfig will handle graph creation/loading automatically
     # It will load from output_file if it exists, or create a new graph if it doesn't
@@ -335,6 +346,12 @@ async def process_conversations_in_batches(
     logger.info(f"Total batches processed: {batch_num - 1}")
     print("\nKnowledge extraction completed successfully!")
     print(f"Detailed log file: {log_file}")
+
+    html_path = export_graph_to_html(
+        output_file, title=f"Relationship Knowledge: {partner1} & {partner2}"
+    )
+    logger.info(f"Graph exported to HTML: {html_path}")
+    print(f"Graph exported to HTML: {html_path}")
 
 
 async def main():

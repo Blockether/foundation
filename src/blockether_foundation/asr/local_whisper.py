@@ -16,7 +16,7 @@ import numpy as np
 from faster_whisper import WhisperModel
 
 try:
-    from torch.cuda import empty_cache
+    from torch.cuda import empty_cache  # type: ignore
 
     TORCH_CUDA_AVAILABLE = True
 except ImportError:

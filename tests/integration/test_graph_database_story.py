@@ -101,6 +101,7 @@ STORY_RELATIONSHIP_TYPES = {
     "created_by",
     "located_at",
     "related_to",
+    "participated_in",
 }
 
 WOLF_TARGET_HOUSES = ["straw house", "stick house"]
@@ -145,10 +146,11 @@ def validate_three_little_pigs_operations(operations: LLMGraphOperations) -> Gra
     logger.info(f"All relationships extracted: {len(relationships)}")
     [logger.info(f"  {rel.source_name} [{rel.type}] -> {rel.target_name}") for rel in relationships]
 
+    # Accept both "created_by" (preferred) and "related_to" (fallback) for build relationships
     build_relationships = {
         (rel.source_name, rel.target_name)
         for rel in relationships
-        if rel.type == "related_to"
+        if rel.type in ("created_by", "related_to")
         and (
             ("house" in rel.source_name and "Pig" in rel.target_name)
             or ("Pig" in rel.source_name and "house" in rel.target_name)
@@ -165,12 +167,13 @@ def validate_three_little_pigs_operations(operations: LLMGraphOperations) -> Gra
     )
 
     # Validate wolf destruction relationships - story accuracy
-    # More flexible check for wolf actions against houses
+    # Accept both "participated_in" (preferred) and "related_to" (fallback)
     wolf_house_relationships = {
         (rel.source_name, rel.target_name, rel.type)
         for rel in relationships
         if "Wolf" in rel.source_name
         and any(house in rel.target_name for house in WOLF_TARGET_HOUSES)
+        and rel.type in ("participated_in", "related_to")
     }
 
     # Check if wolf has any relationship with the target houses (destruction or attack)
@@ -234,7 +237,7 @@ def validate_three_little_pigs_operations(operations: LLMGraphOperations) -> Gra
 def extract_operations_from_run_output_as_dict(run_output: RunOutput) -> dict[str, Any]:
     """Extract operations from a RunOutput object as a dict."""
     # Get content as string once to avoid multiple method calls
-    content_str = run_output.get_content_as_string()  # type: ignore[attr-defined]
+    content_str = run_output.get_content_as_string()
 
     # Parse as JSON if it's a string, otherwise use as-is
     # Ensure content_str is always a string for deterministic behavior
@@ -244,7 +247,7 @@ def extract_operations_from_run_output_as_dict(run_output: RunOutput) -> dict[st
 
 def extract_operations_from_run_output_as_string(run_output: RunOutput) -> str:
     """Extract operations from a RunOutput object as a string."""
-    return run_output.get_content_as_string()  # type: ignore[attr-defined]
+    return run_output.get_content_as_string()
 
 
 def extract_operations_from_run_output(run_output: RunOutput) -> LLMGraphOperations:
@@ -341,11 +344,11 @@ async def test_three_little_pigs_graph_extraction_accuracy():
         - Characters should be type "creature" (Mother Pig, First Little Pig, Second Little Pig, Third Little Pig, Big Bad Wolf)
         - Objects should be type "location" (straw house, stick house, brick house, village)
 
-        For relationships:
-        - Use "related_to" for house → pig relationships (who built the house)
-        - Use "related_to" for wolf → house relationships (houses destroyed by wolf)
-        - Use "related_to" for pig → house relationships (where pigs live)
-        - Use "related_to" for family relationships
+        For relationships, use these specific types:
+        - Use "created_by" for house → pig relationships (who built the house)
+        - Use "participated_in" for wolf → house relationships (wolf participated in destruction events)
+        - Use "located_at" for pig → house relationships (where pigs live/reside)
+        - Use "related_to" for family relationships (Mother Pig related to her children)
 
         Make sure all referenced entities exist before creating relationships.
         Return the operations as a single LLMGraphOperations object.
@@ -361,15 +364,16 @@ async def test_three_little_pigs_graph_extraction_accuracy():
     - 3 houses: straw house, stick house, brick house
 
     Expected relationships:
-    - First Little Pig created_by straw house
-    - Second Little Pig created_by stick house
-    - Third Little Pig created_by brick house
-    - Big Bad Wolf related_to straw house
-    - Big Bad Wolf related_to stick house
+    - straw house created_by First Little Pig
+    - stick house created_by Second Little Pig
+    - brick house created_by Third Little Pig
+    - Big Bad Wolf participated_in straw house (destruction)
+    - Big Bad Wolf participated_in stick house (destruction)
+    - Pigs located_at their respective houses
     """
 
     # Get agent response using async method
-    response: RunOutput = await graph_extractor.arun(story, session_id="accuracy_test")  # type: ignore
+    response: RunOutput = await graph_extractor.arun(story, session_id="accuracy_test")
 
     # Create judge agent for accuracy evaluation
     judge_agent = create_judge_agent(
@@ -455,11 +459,11 @@ async def test_three_little_pigs_graph_extraction_judge():
         - Characters should be type "creature" (Mother Pig, First Little Pig, Second Little Pig, Third Little Pig, Big Bad Wolf)
         - Objects should be type "location" (straw house, stick house, brick house, village)
 
-        For relationships:
-        - Use "related_to" for house → pig relationships (who built the house)
-        - Use "related_to" for wolf → house relationships (houses destroyed by wolf)
-        - Use "related_to" for pig → house relationships (where pigs live)
-        - Use "related_to" for family relationships
+        For relationships, use these specific types:
+        - Use "created_by" for house → pig relationships (who built the house)
+        - Use "participated_in" for wolf → house relationships (wolf participated in destruction events)
+        - Use "located_at" for pig → house relationships (where pigs live/reside)
+        - Use "related_to" for family relationships (Mother Pig related to her children)
 
         Make sure all referenced entities exist before creating relationships.
         Return the operations as a single LLMGraphOperations object.
@@ -473,8 +477,8 @@ async def test_three_little_pigs_graph_extraction_judge():
         criteria=[
             "Extracts all 5 key characters (Mother Pig, 3 Little Pigs, Big Bad Wolf)",
             "Extracts all 3 house locations (straw, stick, brick)",
-            "Creates proper 'related_to' relationships for house building",
-            "Creates proper 'related_to' relationships for wolf destruction",
+            "Creates proper 'created_by' relationships for house building",
+            "Creates proper 'participated_in' relationships for wolf destruction",
             "Valid LLMGraphOperations structure with correct arrays",
             "No missing entities referenced in relationships",
         ],
@@ -482,7 +486,7 @@ async def test_three_little_pigs_graph_extraction_judge():
     )
 
     # Get agent response
-    response: RunOutput = await graph_extractor.arun(story, session_id="judge_test")  # type: ignore
+    response: RunOutput = await graph_extractor.arun(story, session_id="judge_test")
 
     # Create agent-as-judge evaluation
     evaluation = AgentAsJudgeEval(
@@ -542,17 +546,20 @@ def validate_story_content(db: GraphDatabase) -> None:
         "Wolf should have house relationships"
     )
 
-    # Test 4: Test relationship type filtering
-    # The agent uses "related_to" instead of "created_by"
+    # Test 4: Test relationship type filtering - accept both created_by and related_to
     created_by_relationships = cast(
+        list[RelationshipWithEntities],
+        db.query_relationships().type("created_by").execute().results,
+    )
+    related_to_relationships = cast(
         list[RelationshipWithEntities],
         db.query_relationships().type("related_to").execute().results,
     )
+    all_build_candidate_relationships = created_by_relationships + related_to_relationships
 
-    # Filter for house-pig relationships (build relationships)
     build_relationships = [
         (source, target, rel)
-        for source, target, rel in created_by_relationships
+        for source, target, rel in all_build_candidate_relationships
         if ("house" in source.name and "Pig" in target.name)
         or ("Pig" in source.name and "house" in target.name)
     ]

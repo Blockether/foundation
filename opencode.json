@@ -3,6 +3,9 @@
     "instructions": [
         "AGENTS.md"
     ],
+    "plugin": [
+        "@tarquinen/opencode-dcp@latest"
+    ],
     "mcp": {
         "search-engine": {
             "type": "remote",

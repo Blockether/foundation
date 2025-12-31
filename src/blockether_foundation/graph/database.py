@@ -97,6 +97,7 @@ class GraphDatabase:
         self._tantivy_index_path: Path | None = (
             Path(tantivy_index_path) if tantivy_index_path else None
         )
+        self._next_entity_id: int = 1
 
     @property
     def index(self) -> GraphIndex:
@@ -112,7 +113,9 @@ class GraphDatabase:
         Raises:
             ValueError: If entity with this ID already exists.
         """
-        # Use the efficient batch method for single entity
+        if not entity.id:
+            entity.id = str(self._next_entity_id)
+            self._next_entity_id += 1
         self.add_entities([entity])
 
     def add_entities(self, entities: list[Entity]) -> None:
@@ -124,14 +127,21 @@ class GraphDatabase:
         Raises:
             ValueError: If any entity ID already exists.
         """
-        # Check for ID duplicates first
-        existing_ids: list[str] = [e.id for e in entities if e.id in self._index.entity_by_id]
+        entities_to_process: list[Entity] = []
+        for entity in entities:
+            if not entity.id:
+                entity.id = str(self._next_entity_id)
+                self._next_entity_id += 1
+            entities_to_process.append(entity)
+
+        existing_ids: list[str] = [
+            e.id for e in entities_to_process if e.id in self._index.entity_by_id
+        ]
         if existing_ids:
             raise ValueError(f"Entities with IDs already exist: {existing_ids}")
 
-        # Check for name uniqueness within entity type
         name_conflicts: list[str] = []
-        for entity in entities:
+        for entity in entities_to_process:
             existing_name_entity_id = self._index.entity_by_name.get(entity.name)
             if existing_name_entity_id and existing_name_entity_id != entity.id:
                 existing_entity = self._index.entity_by_id.get(existing_name_entity_id)
@@ -143,12 +153,10 @@ class GraphDatabase:
                 f"Entity names must be unique within type. Conflicts: {name_conflicts}"
             )
 
-        # Add all entities to graph index
-        for entity in entities:
+        for entity in entities_to_process:
             self._index.add_entity(entity)
 
-        # Batch add to Tantivy index for efficiency
-        self._incremental_add_entities_to_tantivy(entities)
+        self._incremental_add_entities_to_tantivy(entities_to_process)
 
     def update_entity(self, entity: Entity) -> None:
         """Update existing entity.
@@ -367,6 +375,9 @@ class GraphDatabase:
             ValueError: If entities referenced in operations don't exist.
             TypeError: If operations is not an LLMGraphOperations instance.
         """
+        if not isinstance(operations, LLMGraphOperations):
+            raise TypeError(f"Expected LLMGraphOperations, got {type(operations).__name__}")
+
         operations_list: list[
             LLMGraphAddEntity
             | LLMGraphUpdateEntity
@@ -404,13 +415,16 @@ class GraphDatabase:
             self.delete_entity(delete_entity_op.entity_id)
 
         # Step 3: Add new entities
-        for add_entity_op in add_entities:
-            entity = Entity(
-                name=add_entity_op.name,
-                type=add_entity_op.type,
-                content=add_entity_op.content,
-            )
-            self.add_entity(entity)
+        if add_entities:
+            entities_to_add = [
+                Entity(
+                    name=add_entity_op.name,
+                    type=add_entity_op.type,
+                    content=add_entity_op.content,
+                )
+                for add_entity_op in add_entities
+            ]
+            self.add_entities(entities_to_add)
 
         # Step 4: Update existing entities
         for update_entity_op in update_entities:
@@ -441,6 +455,9 @@ class GraphDatabase:
                 raise ValueError(
                     f"Target entity with name '{add_relationship_op.target_name}' not found"
                 )
+
+            if not source_entity.id or not target_entity.id:
+                raise ValueError("Source or target entity is missing an ID")
 
             self.create_relationship(
                 source=source_entity.id,
@@ -605,7 +622,7 @@ class GraphDatabase:
                 continue
 
             for neighbor in self.get_neighbors(current_id, direction=DIRECTION_BOTH):
-                if neighbor.id in visited:
+                if neighbor.id in visited or neighbor.id is None:
                     continue
 
                 new_path: list[str] = path + [neighbor.id]
@@ -649,16 +666,12 @@ class GraphDatabase:
 
         # Map results back to entities
         entity_scores: list[tuple[Entity, float]] = []
-        entity_id_to_entity: dict[str, Entity] = {
-            e.id: e for e in self._index.entity_by_id.values()
-        }
-
         if results.hits:
             for score, doc_address in results.hits[:top_k]:
                 doc = searcher.doc(doc_address)
                 entity_id: str | None = doc.get_first("id")
-                if entity_id and entity_id in entity_id_to_entity:
-                    entity_scores.append((entity_id_to_entity[entity_id], float(score)))
+                if entity_id and entity_id in self._index.entity_by_id:
+                    entity_scores.append((self._index.entity_by_id[entity_id], float(score)))
 
         return entity_scores
 
@@ -789,11 +802,14 @@ class GraphDatabase:
 
         return query
 
-    def _initialize_tantivy_index(self, force_rebuild: bool = False) -> None:
+    def _initialize_tantivy_index(
+        self, force_rebuild: bool = False, reuse_existing: bool = True
+    ) -> None:
         """Initialize Tantivy index with current entities.
 
         Args:
             force_rebuild: If True, rebuild index even if it exists on disk.
+            reuse_existing: If True, try to reuse existing on-disk index without rebuilding.
         """
         entities = list(self._index.entity_by_id.values())
 
@@ -816,23 +832,50 @@ class GraphDatabase:
             self._tantivy_index_path.mkdir(parents=True, exist_ok=True)
 
             # Try to open existing index on disk
-            if not force_rebuild and self._tantivy_index_path.exists():
+            num_docs = 0  # Track for debugging
+            if reuse_existing and not force_rebuild and self._tantivy_index_path.exists():
                 try:
                     # Try to open existing index
-                    self._tantivy_index = tantivy.Index(schema, path=str(self._tantivy_index_path))
+                    self._tantivy_index = tantivy.Index(
+                        schema, path=str(self._tantivy_index_path), reuse=True
+                    )
                     index = cast(Any, self._tantivy_index)
                     # Check if index has documents
                     searcher = index.searcher()
-                    if searcher.num_docs() > 0:
+                    num_docs = searcher.num_docs
+                    if num_docs > 0:
                         # Index exists and has documents, use it
                         self._tantivy_searcher = searcher
                         return
                     # Index exists but is empty, rebuild it
-                except Exception:
+                    import warnings
+
+                    warnings.warn(
+                        f"Existing Tantivy index at {self._tantivy_index_path} is empty (num_docs=0), rebuilding...",
+                        stacklevel=2,
+                    )
+                except Exception as e:
                     # Failed to open existing index, rebuild it
-                    pass
+                    import warnings
+
+                    warnings.warn(
+                        f"Failed to open existing Tantivy index at {self._tantivy_index_path}: {e}, rebuilding...",
+                        stacklevel=2,
+                    )
 
             # Create new index on disk
+            if reuse_existing and self._tantivy_index_path.exists():
+                import warnings
+
+                if num_docs == 0:
+                    warnings.warn(
+                        f"Rebuilding Tantivy index at {self._tantivy_index_path} (index was empty)",
+                        stacklevel=2,
+                    )
+                else:
+                    warnings.warn(
+                        f"Creating new Tantivy index at {self._tantivy_index_path}", stacklevel=2
+                    )
             self._tantivy_index = tantivy.Index(schema, path=str(self._tantivy_index_path))
         else:
             # In-memory index
@@ -948,6 +991,7 @@ class GraphDatabase:
             "tantivy_index_path": str(self._tantivy_index_path)
             if self._tantivy_index_path
             else None,
+            "next_entity_id": self._next_entity_id,
         }
 
     @classmethod
@@ -965,7 +1009,6 @@ class GraphDatabase:
             Completely restored GraphDatabase with all entities, relationships,
             and fully functional Tantivy search index.
         """
-        # Use saved Tantivy index path if available and no override provided
         if tantivy_index_path is None:
             saved_path = data.get("tantivy_index_path")
             if isinstance(saved_path, str):
@@ -973,13 +1016,16 @@ class GraphDatabase:
 
         db = cls(tantivy_index_path=tantivy_index_path)
 
-        # Restore GraphIndex from saved data
         index_data = data.get("index")
         if index_data and isinstance(index_data, dict):
             db._index = GraphIndex.from_dict(cast(dict[str, Any], index_data))
 
-        # Rebuild Tantivy search index from restored entities
-        # This creates the index and adds all entities for full-text search capability
+        next_entity_id = data.get("next_entity_id")
+        if isinstance(next_entity_id, int):
+            db._next_entity_id = next_entity_id
+        else:
+            db._next_entity_id = max([int(eid) for eid in db._index.entity_by_id.keys()] or [0]) + 1
+
         if db._index.entity_by_id:
             db._initialize_tantivy_index()
 
@@ -1165,6 +1211,9 @@ class GraphDatabase:
         entity_list: list[str] = []
 
         for entity, degree in most_connected:
+            if entity.id is None:
+                continue
+
             # Get relationships for this entity using the public method
             relationships = self.get_entity_relationships(entity.id)
 
@@ -1291,7 +1340,7 @@ class EntityTypeFilter(EntityFilter):
     def apply(self, items: Iterable[Entity], index: GraphIndex | None = None) -> set[str]:
         if index:
             return index.entities_by_type.get(self.entity_type, set())
-        return {item.id for item in items if item.type == self.entity_type}
+        return {item.id for item in items if item.type == self.entity_type and item.id is not None}
 
     @override
     def get_selectivity(self, index: GraphIndex | None = None) -> float:
@@ -1426,7 +1475,10 @@ class OrFilter(Filter[T]):
 
     @override
     def __repr__(self) -> str:
-        return f"OrFilter({len(self.filters)} filters)"
+        if not self.filters:
+            return "OrFilter(empty)"
+        filter_reprs = [repr(f) for f in self.filters]
+        return f"OrFilter([{', '.join(filter_reprs)}])"
 
 
 class EntityQuery:
@@ -1488,25 +1540,12 @@ class EntityQuery:
 
             @override
             def apply(self, items: Iterable[Entity], index: GraphIndex | None = None) -> set[str]:
-                result: set[str] = set()
-                if index:
-                    # Optimization: Iterate over existing dates in index instead of day-by-day
-                    # This is much faster when the range is large but data is sparse
-                    for check_date, entity_ids in index.entities_by_created_date.items():
-                        if self.start_date and check_date < self.start_date:
-                            continue
-                        if self.end_date and check_date > self.end_date:
-                            continue
-                        result.update(cast(Iterable[str], entity_ids))
-                else:
-                    for item in items:
-                        item_date = item.created_at.date()
-                        if self.start_date and item_date < self.start_date:
-                            continue
-                        if self.end_date and item_date > self.end_date:
-                            continue
-                        result.add(item.id)
-                return result
+                if index is None:
+                    raise ValueError("Index required for date range filter")
+                # O(log n) binary search on sorted dates
+                return index.get_entities_in_date_range(
+                    self.start_date, self.end_date, use_created=True
+                )
 
             @override
             def get_selectivity(self, index: GraphIndex | None = None) -> float:
@@ -1519,13 +1558,24 @@ class EntityQuery:
     def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> EntityQuery:
         """Full-text search using Tantivy."""
         search_results = self.database.search(query, top_k)
-        search_ids = {result[0].id for result in search_results}
+        search_ids = {result[0].id for result in search_results if result[0].id is not None}
+        # Store entity names with their types for display
+        search_matches = [(result[0].name, result[0].type) for result in search_results]
 
         class SearchFilter(EntityFilter):
+            search_query: str
             search_ids: set[str]
+            search_matches: list[tuple[str, str]]  # [(name, type), ...]
 
-            def __init__(self, search_ids: set[str]) -> None:
+            def __init__(
+                self,
+                search_query: str,
+                search_ids: set[str],
+                search_matches: list[tuple[str, str]],
+            ) -> None:
+                self.search_query = search_query
                 self.search_ids = search_ids
+                self.search_matches = search_matches
 
             @override
             def apply(self, items: Iterable[Entity], index: GraphIndex | None = None) -> set[str]:
@@ -1539,9 +1589,14 @@ class EntityQuery:
 
             @override
             def __repr__(self) -> str:
-                return f"SearchFilter(matches={len(self.search_ids)} entities)"
+                if not self.search_matches:
+                    return f"SearchFilter(query='{self.search_query}', matches=[])"
+                matches_str = ", ".join(
+                    f"'{name}' ({etype})" for name, etype in self.search_matches
+                )
+                return f"SearchFilter(query='{self.search_query}', matches=[{matches_str}])"
 
-        search_filter = SearchFilter(search_ids)
+        search_filter = SearchFilter(query, search_ids, search_matches)
         self.filters.append(search_filter)
         return self
 
@@ -1644,7 +1699,7 @@ class EntityQuery:
         # Apply neighbor expansion if configured
         if self._expand_depth and self._expand_depth > 0:
             expanded_ids = self._bfs_expand(
-                {entity.id for entity in results},
+                {entity.id for entity in results if entity.id is not None},
                 self._expand_depth,
                 self._expand_direction,
                 self._expand_relationship_type,
@@ -1736,7 +1791,7 @@ class EntityQuery:
                 )
 
                 for neighbor in neighbors:
-                    if neighbor.id not in visited:
+                    if neighbor.id not in visited and neighbor.id is not None:
                         visited.add(neighbor.id)
                         next_level.add(neighbor.id)
                         all_entities.add(neighbor.id)

@@ -7,7 +7,7 @@ def set_primary_language(run_context: RunContext, language: str) -> str:
     if not run_context.session_state:
         raise ValueError("Session state is not initialized.")
     run_context.session_state["primary_language"] = language
-    logger.info(f"Primary language set to: {language}")  # type: ignore
+    logger.info(f"Primary language set to: {language}")
     return f"Primary language set to: {language}"
 
 
@@ -15,7 +15,7 @@ def set_secondary_language(run_context: RunContext, language: str) -> str:
     if not run_context.session_state:
         raise ValueError("Session state is not initialized.")
     run_context.session_state["secondary_language"] = language
-    logger.info(f"Secondary language set to: {language}")  # type: ignore
+    logger.info(f"Secondary language set to: {language}")
     return f"Secondary language set to: {language}"
 
 

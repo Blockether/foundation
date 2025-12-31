@@ -146,9 +146,6 @@ def generate_graph_html(
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
                         </svg>
                     </button>
-                    <div class="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0" style="background-color: {PRIMARY_YELLOW}">
-                        <svg viewBox="113.12 113.12 1003.25 1154.58" aria-hidden="true" preserveAspectRatio="xMinYMid meet"><path d="M614.79,125.623l-489.167,282.375l0,564.792l489.125,282.417l489.125,-282.417l0,-564.792l-489.083,-282.375Zm0,912.834l-301.417,-174.042l0,-122.958l409.209,-0l193.666,122.958l-301.458,174.042Zm107.75,-399.125l-409.167,-0l0,-122.959l301.417,-174.041l301.417,174.041l-193.667,122.959Z" class="stroke-25 transition-all duration-300 stroke-neutral-950" fill="#fc0"></path></svg>
-                    </div>
                     <div class="hidden sm:block">
                         <h1 class="text-lg font-bold text-gray-900 leading-tight">{_escape_js_string(title)}</h1>
                     </div>

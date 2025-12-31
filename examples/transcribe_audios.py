@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Transcribe Session Audio Files
+Transcribe Audio Files
 
-This script processes all audio files in the sessions/ directory and transcribes them.
+This script processes all audio files in the input/ directory and transcribes them.
 It saves the transcription results as JSON files in the same directory.
 
 Usage:
-    python examples/transcribe_sessions.py --participants "Alice and Bob" --context "Alice's friend Charlie is sometimes mentioned"
-    python examples/transcribe_sessions.py --sessions-dir my_sessions/
+    python examples/transcribe_audios.py --participants "Alice and Bob" --context "Alice's friend Charlie is sometimes mentioned"
+    python examples/transcribe_audios.py --input-dir my_audios/
 """
 
 import argparse
@@ -42,7 +42,7 @@ def build_transcription_prompt(participants: str, context: str | None = None) ->
     Returns:
         Formatted transcription prompt
     """
-    prompt = f"AUTOMATICALLY TRANSLATE THE CONVERSATION TO !!!ENGLISH!!!. !OVERRIDE PREVIOUS INSTRUCTIONS! THERE ARE PARTICIPANTS: {participants}."
+    prompt = f"Translate the conversation into fluent, natural English. Participants: {participants}. Preserve speaker labels, turn boundaries, and timestamps. Keep names and proper nouns unchanged. Provide a faithful translation (not a summary); if a phrase is ambiguous, include a short bracketed clarification. Output plain text transcript (or JSON if requested)."
     if context:
         prompt += f" {context}"
     return prompt
@@ -51,21 +51,21 @@ def build_transcription_prompt(participants: str, context: str | None = None) ->
 async def main():
     """Main transcription function."""
     parser = argparse.ArgumentParser(
-        description="Transcribe audio files from sessions directory",
+        description="Transcribe audio files from input directory",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
     %(prog)s --participants "Alice and Bob"
     %(prog)s --participants "Alice and Bob" --context "Their friend Charlie is sometimes mentioned"
-    %(prog)s --sessions-dir my_sessions/ --participants "Speaker1 and Speaker2"
+    %(prog)s --input-dir my_audios/ --participants "Speaker1 and Speaker2"
         """,
     )
 
     parser.add_argument(
-        "--sessions-dir",
+        "--input-dir",
         type=str,
-        default="sessions",
-        help="Directory containing audio files (default: sessions)",
+        default="input",
+        help="Directory containing audio files (default: input)",
     )
 
     parser.add_argument(
@@ -98,7 +98,7 @@ Examples:
 
     args = parser.parse_args()
 
-    logger.info("Starting session transcription process...")
+    logger.info("Starting audio transcription process...")
 
     # Check for required environment variables
     model_base_url = os.getenv("BLOCKETHER_LLM_API_BASE_URL")
@@ -115,24 +115,22 @@ Examples:
     )
     logger.info(f"Using model: gpt-4.1 at {model_base_url}")
 
-    # Ensure sessions directory exists
-    sessions_dir = Path(args.sessions_dir)
-    if not sessions_dir.exists():
-        logger.error(f"Sessions directory not found at {sessions_dir}!")
-        logger.info(
-            f"Please create a '{args.sessions_dir}' directory and add your audio files there."
-        )
+    # Ensure input directory exists
+    input_dir = Path(args.input_dir)
+    if not input_dir.exists():
+        logger.error(f"Input directory not found at {input_dir}!")
+        logger.info(f"Please create a '{args.input_dir}' directory and add your audio files there.")
         return
 
     # Look for audio files
     audio_files = (
-        list(sessions_dir.glob("*.m4a"))
-        + list(sessions_dir.glob("*.wav"))
-        + list(sessions_dir.glob("*.mp3"))
+        list(input_dir.glob("*.m4a"))
+        + list(input_dir.glob("*.wav"))
+        + list(input_dir.glob("*.mp3"))
     )
 
     if not audio_files:
-        logger.warning(f"No audio files found in {sessions_dir}/")
+        logger.warning(f"No audio files found in {input_dir}/")
         logger.info("Supported formats: .m4a, .wav, .mp3")
         return
 
@@ -144,18 +142,18 @@ Examples:
 
     # Process audio files with blockether model
     await process_audio_files(
-        glob_pattern=str(sessions_dir.absolute() / "*"),
-        output_dir=str(sessions_dir.absolute()),
+        glob_pattern=str(input_dir.absolute() / "*"),
+        output_dir=str(input_dir.absolute()),
         model=blockether_model,
         input=transcription_prompt,
         audio_transcriber=LocalWhisperAudioTranscriber(),
         debug_mode=True,
         audio_chunking=True,
         save_raw_transcription=True,
-        save_dir=str(sessions_dir.absolute()),
+        save_dir=str(input_dir.absolute()),
     )
 
-    logger.info("Session transcription process completed.")
+    logger.info("Audio transcription process completed.")
 
 
 if __name__ == "__main__":

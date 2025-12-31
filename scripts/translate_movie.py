@@ -120,9 +120,7 @@ from blockether_foundation.agents.transcriber import (
 from blockether_foundation.asr import LocalWhisperAudioTranscriber
 from blockether_foundation.tts import (
     TTS_ELEVENLABS_AVAILABLE,
-    TTS_LOCAL_AVAILABLE,
     ElevenLabsTTS,
-    LocalCoquiTTS,
 )
 
 logging.basicConfig(
@@ -1015,21 +1013,17 @@ def generate_tts_audio(
     transcription: TranscriptionResult,
     voice_path: str | None = None,
     language: str = "en",
-    tts_model_name: str = "tts_models/multilingual/multi-dataset/xtts_v2",
+    eleven_model_id: str = "eleven_flash_v2_5",
     from_range: float | None = None,
     to_range: float | None = None,
     output_dir: str | None = None,
-    tts_backend: str = "coqui",
-    eleven_model_id: str = "eleven_flash_v2_5",
 ) -> list[tuple[float, float, bytes, float]]:
     logger.info(f"Generating TTS audio for {len(transcription.conversation)} dialogue lines")
     logger.info(f"  Voice: {voice_path or 'default'}")
     logger.info(f"  Language: {language}")
-    logger.info(f"  Backend: {tts_backend}")
+    logger.info(f"  Backend: ElevenLabs")
     if from_range is not None or to_range is not None:
         logger.info(f"  Range: {from_range or 0:.1f}s to {to_range or 'end'}s")
-
-    if tts_backend == "elevenlabs":
         if not TTS_ELEVENLABS_AVAILABLE:
             raise ImportError(
                 "ElevenLabs TTS is not installed. "
@@ -1046,17 +1040,6 @@ def generate_tts_audio(
         tts = ElevenLabsTTS(
             api_key=api_key,
             model_id=eleven_model_id,
-        )
-    else:
-        if not TTS_LOCAL_AVAILABLE:
-            raise ImportError(
-                "Coqui TTS is not installed. "
-                "Install it with: uv pip install 'blockether-foundation[tts_local]'"
-            )
-
-        logger.info(f"  Model: {tts_model_name} (Coqui TTS)")
-        tts = LocalCoquiTTS(
-            model_name=tts_model_name, progress_bar=False, segment_output_dir=output_dir
         )
     tts_segments: list[tuple[float, float, bytes, float]] = []
 
@@ -1098,22 +1081,12 @@ def generate_tts_audio(
             f"  Synthesizing line {i + 1}/{len(transcription.conversation)}: {line.text[:50]}..."
         )
 
-        if tts_backend == "elevenlabs":
-            # ElevenLabs doesn't support segment_index or segment_timerange
-            result = tts.synthesize(
-                text=line.text,
-                voice=voice_path,
-                language=language,
-            )
-        else:
-            # Coqui TTS supports segment tracking
-            result = tts.synthesize(
-                text=line.text,
-                voice=voice_path,
-                language=language,
-                segment_index=i,
-                segment_timerange=(line.timerange.start, line.timerange.end),
-            )
+        # ElevenLabs doesn't support segment_index or segment_timerange
+        result = tts.synthesize(
+            text=line.text,
+            voice=voice_path,
+            language=language,
+        )
 
         if result is not None and result.audio:
             tts_duration_ms = int(result.duration * 1000)
@@ -1416,28 +1389,15 @@ async def main() -> None:
         help="Voice name for TTS (e.g., 'jerzy', 'tusk', 'nawrocki'). If not specified, uses default voice.",
     )
     parser.add_argument(
-        "--tts-model",
-        type=str,
-        default="tts_models/multilingual/multi-dataset/xtts_v2",
-        help="Coqui TTS model name (default: tts_models/multilingual/multi-dataset/xtts_v2).",
-    )
-    parser.add_argument(
         "--enable-tts",
         action="store_true",
         help="Enable TTS audio generation and mixing. Requires --voice.",
     )
     parser.add_argument(
-        "--tts-backend",
-        type=str,
-        default="coqui",
-        choices=["coqui", "elevenlabs"],
-        help="TTS backend to use (default: coqui). Options: 'coqui' for local Coqui TTS, 'elevenlabs' for ElevenLabs API.",
-    )
-    parser.add_argument(
         "--eleven-model-id",
         type=str,
         default="eleven_flash_v2_5",
-        help="ElevenLabs model ID (default: eleven_flash_v2_5 for Flash multilingual, or 'eleven_flash_v2' for English-only flash). Used only when --tts-backend=elevenlabs.",
+        help="ElevenLabs model ID (default: eleven_flash_v2_5 for Flash multilingual, or 'eleven_flash_v2' for English-only flash).",
     )
 
     args = parser.parse_args()
@@ -1644,11 +1604,9 @@ async def main() -> None:
             transcription=tts_transcription,
             voice_path=voice_path,
             language=target_lang_code,
-            tts_model_name=args.tts_model,
             from_range=args.from_range,
             to_range=args.to_range,
             output_dir=segments_dir,
-            tts_backend=args.tts_backend,
             eleven_model_id=args.eleven_model_id,
         )
 

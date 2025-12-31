@@ -79,6 +79,9 @@ def format_graph_query_results(
     xml_parts.append(f"<!-- Iteration {iteration} -->")
     xml_parts.append("<graph_knowledge>")
 
+    # Track entities across ALL queries to avoid duplicates
+    seen_entities: set[str] = set()
+
     for i, query in enumerate(query_builders):
         xml_parts.append(f'  <query_with_results index="{i + 1}">')
 
@@ -99,9 +102,6 @@ def format_graph_query_results(
             if (
                 isinstance(first_result, dict) and "name" in first_result and "type" in first_result
             ) or isinstance(first_result, Entity):
-                # Track entities to avoid duplicates
-                seen_entities: set[str] = set()
-
                 for entity in result.results[:max_results_per_query]:
                     # Cast to Entity for type checker
                     entity_typed = cast("Entity", entity)
@@ -126,8 +126,6 @@ def format_graph_query_results(
 
             # Check if it's a Relationship query result
             elif isinstance(result.results[0], tuple) and len(result.results[0]) == 3:
-                seen_entities: set[str] = set()
-
                 for rel_tuple in result.results[:max_results_per_query]:
                     # Type the tuple properly
                     source, target, relationship = cast(
@@ -249,16 +247,21 @@ def format_existing_entities_for_context(
 def format_entities_with_relationships_for_prompt(
     entity_ids: set[str],
     graph: GraphDatabase,
+    *,
+    max_content_length: int | None = 200,
+    max_rels_per_entity: int = 10,
 ) -> str:
-    """Format entities with their relationships for the LLM prompt in XML format.
+    """Format entities with their relationships for LLM prompt in XML format.
 
-    This function formats specific entities (by ID) with all their relationships
+    This function formats specific entities (by ID) with their relationships
     for inclusion in LLM prompts. Unlike format_existing_entities_for_context,
     this doesn't limit the number of entities and uses the exact entity IDs provided.
 
     Args:
         entity_ids: Set of entity IDs to format
         graph: GraphDatabase instance to query
+        max_content_length: Maximum length of entity content before truncation. None for no truncation.
+        max_rels_per_entity: Maximum number of relationships to show per entity
 
     Returns:
         Formatted XML string with entities and their relationships
@@ -279,7 +282,12 @@ def format_entities_with_relationships_for_prompt(
             attrs = f"id={quoteattr(str(entity.id))} name={quoteattr(entity.name)} type={quoteattr(entity.type)}"
             xml_parts.append(f"  <entity {attrs}>")
 
-            # Add relationships
+            if entity.content:
+                content = entity.content
+                if max_content_length is not None and len(content) > max_content_length:
+                    content = content[:max_content_length] + "..."
+                xml_parts.append(f"    <content>{escape(content)}</content>")
+
             xml_parts.append("    <rels>")
             relationships = graph.get_entity_relationships(entity_id)
 
@@ -290,7 +298,7 @@ def format_entities_with_relationships_for_prompt(
                     0 if entity and r.source == entity.id else 1,  # Outgoing first
                     r.type,  # Then by type for consistency
                 ),
-            )
+            )[:max_rels_per_entity]
 
             for rel in outgoing_first:
                 if rel.source == entity.id:

@@ -46,6 +46,10 @@ RelationType = Literal[
     "expands_to",
     "explains",
     "is_a_fact",
+    "participated_in",
+    "alias_of",
+    "created_by",
+    "located_at",
 ]
 
 
@@ -88,8 +92,8 @@ class Entity(TimestampMixin):
 
     name: str  # Human-readable identifier (unique per type)
     type: EntityType
+    id: str | None = None
     content: str | None = None
-    id: str = field(default_factory=lambda: generate_secure_id(size=5))  # Auto-generated secure ID
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -183,10 +187,6 @@ class LLMGraphOperations(ChainOfThoughts):
     delete_relationship_ops: list[LLMGraphDeleteRelationship] = Field(
         description="List of delete relationship operations."
     )
-    importance: float | None = Field(
-        default=None,
-        description="Overall importance score of the operations set (0.0 to 1.0). Optional field for prioritization.",
-    )
 
     @property
     def ops(
@@ -202,51 +202,6 @@ class LLMGraphOperations(ChainOfThoughts):
 
         Validates that each entity/relationship appears in at most one operation.
         """
-        # Validate: each entity ID must appear in only one operation
-        # Note: AddEntityLLMGraph uses name as key (no ID yet), UpdateEntityLLMGraph uses ID
-        seen_entity_names: set[str] = set()
-        seen_entity_ids: set[str] = set()
-
-        for op in self.add_entity_ops:
-            entity_name = op.name
-            if entity_name in seen_entity_names:
-                raise ValueError(f"Duplicate add operation for entity name '{entity_name}'")
-            seen_entity_names.add(entity_name)
-
-        for op in self.update_entity_ops:
-            entity_id = op.id
-            if entity_id in seen_entity_ids:
-                raise ValueError(f"Duplicate update operation for entity ID '{entity_id}'")
-            seen_entity_ids.add(entity_id)
-
-        for op in self.delete_entity_ops:
-            if op.entity_id in seen_entity_ids:
-                raise ValueError(f"Duplicate delete operation for entity ID '{op.entity_id}'")
-            seen_entity_ids.add(op.entity_id)
-
-        # Normalize relationship operations by keeping first occurrence of each edge
-        add_relationship_ids: set[str] = set()
-        normalized_add_relationship_ops: list[LLMGraphAddRelationship] = []
-        for op in self.add_relationship_ops:
-            rel_id = f"{op.source_name}_{op.target_name}"
-            if rel_id in add_relationship_ids:
-                continue
-            add_relationship_ids.add(rel_id)
-            normalized_add_relationship_ops.append(op)
-
-        if len(normalized_add_relationship_ops) != len(self.add_relationship_ops):
-            self.add_relationship_ops = normalized_add_relationship_ops
-
-        delete_relationship_ids: set[str] = set()
-        normalized_delete_relationship_ops: list[LLMGraphDeleteRelationship] = []
-        for op in self.delete_relationship_ops:
-            if op.id in delete_relationship_ids:
-                continue
-            delete_relationship_ids.add(op.id)
-            normalized_delete_relationship_ops.append(op)
-
-        if len(normalized_delete_relationship_ops) != len(self.delete_relationship_ops):
-            self.delete_relationship_ops = normalized_delete_relationship_ops
 
         return [
             *self.add_entity_ops,
@@ -381,4 +336,83 @@ class QualityAssessment(ChainOfThoughts):
     suggested_refinements: list[str] = Field(
         default_factory=list,
         description="Suggestions for improving existing queries (broader search, different types, etc.)",
+    )
+
+
+class ExtractionQualityAssessment(ChainOfThoughts):
+    """Assessment of extracted graph operations quality.
+
+    Used by the graph post-hook to evaluate whether extracted entities
+    and relationships are well-formed before importing to the graph.
+    """
+
+    has_duplicate_entities: bool = Field(
+        description="True if duplicate or near-duplicate entities detected (e.g., 'Ashley' and 'Ashley Wojcik')"
+    )
+    has_verbose_entity_names: bool = Field(
+        description="True if entity names are overly verbose (descriptions used as names instead of identifiers)"
+    )
+    has_disconnected_components: bool = Field(
+        description="True if entities exist without proper relationships connecting them"
+    )
+    quality_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Overall extraction quality score (0.0=poor, 1.0=excellent)",
+    )
+    needs_resolution: bool = Field(
+        description="True if entity resolution pass is recommended to fix issues"
+    )
+    specific_issues: list[str] = Field(
+        default_factory=list,
+        description="Specific issues identified in the extraction that need resolution",
+    )
+    duplicate_candidates: list[list[str]] = Field(
+        default_factory=list[list[str]],
+        description="Pairs of entity names as [old, new] that appear to be duplicates",
+    )
+
+
+class LLMEntityMerge(ChainOfThoughts):
+    """Represents a single entity merge operation.
+
+    When duplicate entities are detected, this describes how to merge them
+    into a single canonical entity.
+    """
+
+    canonical_name: str = Field(
+        description="The correct, canonical name to use for this entity (most complete/specific form)"
+    )
+    aliases_to_merge: list[str] = Field(
+        description="List of entity names that should be merged into the canonical entity"
+    )
+    entity_type: EntityType = Field(description="The entity type for the merged entity")
+    merged_content: str = Field(
+        description="Combined content from all merged entities, preserving important information"
+    )
+
+
+class LLMEntityResolutionResult(ChainOfThoughts):
+    """Result of entity resolution analysis.
+
+    Contains the operations needed to deduplicate and normalize entities
+    before importing to the graph database.
+    """
+
+    merge_operations: list[LLMEntityMerge] = Field(
+        default_factory=list[LLMEntityMerge],
+        description="List of entity merge operations to perform (for duplicates)",
+    )
+    entities_to_rename: list[list[str]] = Field(
+        default_factory=list[list[str]],
+        description="List of [old_name, new_name] pairs for renaming verbose entity names",
+    )
+    quality_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Quality score after resolution (0.0=still issues, 1.0=clean)",
+    )
+    issues_resolved: list[str] = Field(
+        default_factory=list,
+        description="List of issues that were resolved by this operation",
     )

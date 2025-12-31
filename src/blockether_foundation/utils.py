@@ -5,6 +5,7 @@ import dataclasses
 import inspect
 import json
 import logging
+import re
 import secrets
 from collections.abc import Callable, Coroutine
 from dataclasses import fields
@@ -303,6 +304,7 @@ def create_agent_with_instructions(
     debug_mode: DebugMode = False,
     expected_output: str | None = None,
     output_schema: Any | None = None,
+    tools: list[Any] | None = None,
 ) -> Agent:
     """Create an agent with structured description and instructions.
 
@@ -315,6 +317,7 @@ def create_agent_with_instructions(
         model: Optional model to use (inherits from creating agent if None)
         debug_mode: Optional debug mode flag
         output_schema: Optional output schema for structured output
+        tools: Optional list of tools to provide to the agent
 
     Returns:
         Configured Agent instance
@@ -330,6 +333,8 @@ def create_agent_with_instructions(
         agent_kwargs["model"] = model
     if output_schema is not None:
         agent_kwargs["output_schema"] = output_schema
+    if tools is not None:
+        agent_kwargs["tools"] = tools
 
     return Agent(**agent_kwargs)
 
@@ -411,3 +416,95 @@ def read_binary_file_safely(file_path: str | Path) -> bytes | None:
     except (FileNotFoundError, OSError, PermissionError) as e:
         logger.warning(f"Failed to read file {file_path}: {e}")
         return None
+
+
+def normalize_text_for_tts(text: str) -> str:
+    """Normalize text for text-to-speech synthesis.
+
+    Converts formatted text (markdown, bullets, etc.) into natural speech-friendly format
+    by removing formatting, adding conversational pauses, and ensuring proper punctuation.
+
+    Args:
+        text: The text to normalize for TTS
+
+    Returns:
+        Normalized text suitable for speech synthesis
+    """
+    if not text or not text.strip():
+        return text
+
+    # Remove markdown formatting
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"__(.*?)__", r"\1", text)
+    text = re.sub(r"\*(.*?)\*", r"\1", text)
+    text = re.sub(r"_(.*?)_", r"\1", text)
+    text = re.sub(r"`(.*?)`", r"\1", text)
+    text = re.sub(r"```.*?\n(.*?)\n```", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+    text = re.sub(r"^#+\s+", "", text, flags=re.MULTILINE)
+
+    # Convert bullet points to natural pauses
+    text = re.sub(r"^\s*[-*+]\s+", "• ", text, flags=re.MULTILINE)
+    text = re.sub(r"•\s*([^\n•]*?)(?=•|\n|$)", r"• \1. ", text)
+
+    # Handle numbered lists
+    text = re.sub(r"^(\d+\.)\s*([^\n]+?)(?=\n\d+\.|\n\n|$)", r"\1 \2. ", text, flags=re.MULTILINE)
+
+    # Add conversational pauses for long sentences
+    text = re.sub(r"(\w+)\n\s*(and|but|or)\s+", r"\1. \2 ", text, flags=re.IGNORECASE)
+
+    # Clean up excessive whitespace
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r" +", " ", text)
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    text = text.strip()
+
+    # Add final period if missing and text doesn't end with sentence-ending punctuation
+    if text and text[-1] not in {".", "!", "?", ":", ";"}:
+        text += "."
+
+    # Step 1: Remove markdown formatting
+    # Bold: **text** or __text__
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"__(.*?)__", r"\1", text)
+    # Italic: *text* or _text_
+    text = re.sub(r"\*(.*?)\*", r"\1", text)
+    text = re.sub(r"_(.*?)_", r"\1", text)
+    # Code: `text`
+    text = re.sub(r"`(.*?)`", r"\1", text)
+    # Code blocks: ```code```
+    text = re.sub(r"```.*?\n(.*?)\n```", r"\1", text, flags=re.DOTALL)
+    # Links: [text](url) -> text
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+    # Headers: # Title -> Title
+    text = re.sub(r"^#+\s+", "", text, flags=re.MULTILINE)
+
+    # Step 2: Convert bullet points to natural pauses
+    # Replace - * + bullets with "• "
+    text = re.sub(r"^\s*[-*+]\s+", "• ", text, flags=re.MULTILINE)
+    # Ensure bullet points end with periods for natural speech
+    text = re.sub(r"•\s*([^\n•]*?)(?=•|\n|$)", r"• \1. ", text)
+
+    # Step 3: Handle numbered lists
+    # Ensure numbered lists end with periods
+    text = re.sub(r"^(\d+\.)\s*([^\n]+?)(?=\n\d+\.|\n\n|$)", r"\1 \2. ", text, flags=re.MULTILINE)
+
+    # Step 4: Add conversational pauses for long sentences
+    # Add periods before "and", "but", "or" when they start new sentences
+    text = re.sub(r"(\w+)\n\s*(and|but|or)\s+", r"\1. \2 ", text, flags=re.IGNORECASE)
+
+    # Step 5: Clean up excessive whitespace
+    # Collapse multiple newlines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    # Collapse multiple spaces
+    text = re.sub(r" +", " ", text)
+    # Remove leading/trailing whitespace from lines
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    # Trim final result
+    text = text.strip()
+
+    # Step 6: Add final period if missing and text doesn't end with sentence-ending punctuation
+    if text and text[-1] not in {".", "!", "?", ":", ";"}:
+        text += "."
+
+    return text

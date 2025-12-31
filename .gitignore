@@ -11,5 +11,7 @@ htmlcov
 examples/telegram/blockether_foundation.tar.gz
 coverage.json
 *.mp3
+src/!models
 models
 sessions
+agno.db

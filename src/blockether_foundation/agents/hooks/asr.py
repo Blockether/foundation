@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -202,6 +207,261 @@ async def _save_transcription_to_file(
     save_data_to_json_file(transcription_data, output_file)
 
 
+def _wait_for_spacebar() -> None:
+    """Wait for spacebar to be pressed (synchronous, cross-platform)."""
+    import select
+    import termios
+
+    if sys.platform == "win32":
+        import msvcrt
+
+        log_debug("Press SPACE to start/stop recording...")
+        while True:
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key == b" ":
+                    return
+    else:
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            log_debug("Press SPACE to start/stop recording...")
+            while True:
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    key = sys.stdin.read(1)
+                    if key == " ":
+                        return
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def record_interactive_audio(
+    sample_rate: int = 16000,
+    channels: int = 1,
+    output_format: str = "wav",
+) -> tuple[bytes, str]:
+    """Record audio interactively with spacebar control.
+
+    Press SPACE to start recording, press SPACE again to stop.
+
+    Args:
+        sample_rate: Audio sample rate in Hz (default: 16000 for Whisper)
+        channels: Number of audio channels (default: 1 for mono)
+        output_format: Output audio format (default: "wav")
+
+    Returns:
+        Tuple of (audio_bytes, filepath) where filepath is a temp file path
+
+    Raises:
+        RuntimeError: If audio recording fails
+    """
+    log_debug("=" * 60)
+    log_debug("Interactive Audio Recording")
+    log_debug("=" * 60)
+    log_debug("  - Press SPACE to START recording")
+    log_debug("  - Speak into your microphone")
+    log_debug("  - Press SPACE to STOP recording")
+    log_debug("=" * 60)
+
+    _wait_for_spacebar()
+    log_debug("🔴 Recording... Press SPACE to stop")
+
+    with tempfile.NamedTemporaryFile(suffix=f".{output_format}", delete=False) as temp_file:
+        temp_path = temp_file.name
+
+    try:
+        recording_cmd, recording_args = _get_recording_command(temp_path, sample_rate, channels)
+
+        log_debug(f"Using recording command: {recording_cmd}")
+
+        process = subprocess.Popen(
+            [recording_cmd] + recording_args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        if sys.platform == "win32":
+            import msvcrt
+
+            while process.poll() is None:
+                if msvcrt.kbhit():
+                    key = msvcrt.getch()
+                    if key == b" ":
+                        process.terminate()
+                        process.wait()
+                        break
+                import time
+
+                time.sleep(0.01)
+        else:
+            import select
+            import termios
+            import tty
+
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
+            try:
+                tty.setraw(sys.stdin.fileno())
+                while process.poll() is None:
+                    if select.select([sys.stdin], [], [], 0)[0]:
+                        key = sys.stdin.read(1)
+                        if key == " ":
+                            process.terminate()
+                            process.wait()
+                            break
+                    import time
+
+                    time.sleep(0.01)
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+        log_debug("✅ Recording stopped!")
+
+        if not Path(temp_path).exists() or Path(temp_path).stat().st_size == 0:
+            raise RuntimeError("No audio data recorded - file is empty or was not created")
+
+        with open(temp_path, "rb") as f:
+            audio_bytes = f.read()
+
+        log_debug(f"Recorded {len(audio_bytes)} bytes to {temp_path}")
+        return audio_bytes, temp_path
+
+    except Exception as e:
+        import os
+
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+        raise RuntimeError(f"Audio recording failed: {e}") from e
+
+
+def _get_recording_command(
+    output_path: str,
+    sample_rate: int,
+    channels: int,
+) -> tuple[str, list[str]]:
+    """Get platform-specific recording command and arguments.
+
+    Args:
+        output_path: Path to save audio file
+        sample_rate: Audio sample rate in Hz
+        channels: Number of audio channels
+
+    Returns:
+        Tuple of (command, args)
+
+    Raises:
+        RuntimeError: If no suitable recording tool is found
+    """
+    if sys.platform == "darwin":
+        if shutil.which("rec"):
+            return "rec", [
+                "-q",
+                "-r",
+                str(sample_rate),
+                "-c",
+                str(channels),
+                "-e",
+                "signed",
+                "-b",
+                "16",
+                output_path,
+            ]
+        elif shutil.which("ffmpeg"):
+            return "ffmpeg", [
+                "-f",
+                "avfoundation",
+                "-i",
+                ":0",
+                "-q:a",
+                "0",
+                "-ar",
+                str(sample_rate),
+                "-ac",
+                str(channels),
+                "-y",
+                output_path,
+            ]
+        else:
+            raise RuntimeError(
+                "No audio recording tool found on macOS. "
+                "Install one of: sox (brew install sox), ffmpeg (brew install ffmpeg)"
+            )
+
+    elif sys.platform == "linux":
+        if shutil.which("arecord"):
+            return "arecord", [
+                "-q",
+                "-f",
+                "S16_LE",
+                "-r",
+                str(sample_rate),
+                "-c",
+                str(channels),
+                output_path,
+            ]
+        elif shutil.which("rec"):
+            return "rec", [
+                "-q",
+                "-r",
+                str(sample_rate),
+                "-c",
+                str(channels),
+                "-e",
+                "signed",
+                "-b",
+                "16",
+                output_path,
+            ]
+        elif shutil.which("ffmpeg"):
+            return "ffmpeg", [
+                "-f",
+                "alsa",
+                "-i",
+                "default",
+                "-q:a",
+                "0",
+                "-ar",
+                str(sample_rate),
+                "-ac",
+                str(channels),
+                "-y",
+                output_path,
+            ]
+        else:
+            raise RuntimeError(
+                "No audio recording tool found on Linux. "
+                "Install one of: alsa-utils (apt install alsa-utils), sox (apt install sox), ffmpeg (apt install ffmpeg)"
+            )
+
+    elif sys.platform == "win32":
+        if shutil.which("ffmpeg"):
+            return "ffmpeg", [
+                "-f",
+                "dshow",
+                "-i",
+                "audio=Microphone",
+                "-q:a",
+                "0",
+                "-ar",
+                str(sample_rate),
+                "-ac",
+                str(channels),
+                "-y",
+                output_path,
+            ]
+        else:
+            raise RuntimeError(
+                "No audio recording tool found on Windows. "
+                "Install ffmpeg: https://ffmpeg.org/download.html"
+            )
+
+    else:
+        raise RuntimeError(f"Unsupported platform: {sys.platform}")
+
+
 class TranscriptionHooksConfig:
     """Configuration for transcription hooks."""
 
@@ -214,6 +474,7 @@ class TranscriptionHooksConfig:
         async_hooks: bool = True,
         max_segments: int | None = None,
         effort: float = 1.0,
+        enable_interactive_recording: bool = False,
     ):
         self.transcriber = transcriber
         self.language = language
@@ -222,6 +483,7 @@ class TranscriptionHooksConfig:
         self.async_hooks = async_hooks
         self.max_segments = max_segments
         self.effort = effort
+        self.enable_interactive_recording = enable_interactive_recording
 
     def pre_hook(self) -> AgnoPreHook:
         """Get the pre-hook for transcription.
@@ -237,6 +499,7 @@ class TranscriptionHooksConfig:
             max_segments=self.max_segments,
             effort=self.effort,
             async_hooks=not self.async_hooks,
+            enable_interactive_recording=self.enable_interactive_recording,
         )
 
 
@@ -248,6 +511,7 @@ def _create_transcription_hook(
     max_segments: int | None,
     effort: float,
     async_hooks: bool = True,
+    enable_interactive_recording: bool = False,
 ) -> AgnoPreHook:
     """Create transcription hook.
 
@@ -273,8 +537,17 @@ def _create_transcription_hook(
     ) -> None:
         """Shared hook implementation for transcription."""
         if not run_input.audios:
-            log_debug("No audio files to transcribe")
-            return
+            if enable_interactive_recording:
+                log_debug("No audio files, enabling interactive recording")
+                audio_bytes, temp_path = record_interactive_audio()
+                run_input.audios = [Audio(content=audio_bytes, id="interactive_recording")]
+                log_debug(f"Recorded {len(audio_bytes)} bytes of audio")
+
+                if temp_path:
+                    Path(temp_path).unlink(missing_ok=True)
+            else:
+                log_debug("No audio files to transcribe")
+                return
 
         log_debug(f"Processing {len(run_input.audios)} audio(s) for transcription")
 
