@@ -126,7 +126,7 @@ class ContextManager:
             TokenizationError: If tokenization fails
         """
         try:
-            return litellm.token_counter(model=self._model_id, text=text)  # type: ignore[reportUnknownMemberType]
+            return litellm.token_counter(model=self._model_id, text=text)
         except Exception as e:
             raise TokenizationError(f"Failed to count tokens: {e}") from e
 
@@ -157,7 +157,7 @@ class ContextManager:
         if self._agent.description:
             overhead_parts.append(f"Description: {self._agent.description}")
 
-        if self._agent.instructions:  # type: ignore[reportUnknownMemberType]
+        if self._agent.instructions:
             instructions = self._agent.instructions  # type: ignore[reportUnknownMemberType]
             if isinstance(instructions, list):
                 instructions_text = "\n".join(instructions)  # type: ignore[reportUnknownArgumentType]

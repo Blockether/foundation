@@ -207,6 +207,63 @@ async def _save_transcription_to_file(
     save_data_to_json_file(transcription_data, output_file)
 
 
+def _copy_to_clipboard(text: str) -> bool:
+    """Copy text to clipboard using platform-specific commands.
+
+    Args:
+        text: The text to copy to clipboard
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        if sys.platform == "darwin":
+            # macOS
+            process = subprocess.Popen(
+                ["pbcopy"],
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            process.communicate(input=text.encode("utf-8"))
+            return process.returncode == 0
+
+        elif sys.platform == "linux":
+            # Linux - try xclip first, then xsel
+            for cmd in [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]:
+                if shutil.which(cmd[0]):
+                    process = subprocess.Popen(
+                        cmd,
+                        stdin=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    process.communicate(input=text.encode("utf-8"))
+                    if process.returncode == 0:
+                        return True
+            log_warning(
+                "No clipboard tool found on Linux. "
+                "Install xclip (apt install xclip) or xsel (apt install xsel)"
+            )
+            return False
+
+        elif sys.platform == "win32":
+            # Windows
+            process = subprocess.Popen(
+                ["clip"],
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            process.communicate(input=text.encode("utf-16-le"))
+            return process.returncode == 0
+
+        else:
+            log_warning(f"Clipboard not supported on platform: {sys.platform}")
+            return False
+
+    except Exception as e:
+        log_warning(f"Failed to copy to clipboard: {e}")
+        return False
+
+
 def _wait_for_spacebar() -> None:
     """Wait for spacebar to be pressed (synchronous, cross-platform)."""
     import select
@@ -475,6 +532,7 @@ class TranscriptionHooksConfig:
         max_segments: int | None = None,
         effort: float = 1.0,
         enable_interactive_recording: bool = False,
+        copy_to_clipboard: bool = False,
     ):
         self.transcriber = transcriber
         self.language = language
@@ -484,6 +542,7 @@ class TranscriptionHooksConfig:
         self.max_segments = max_segments
         self.effort = effort
         self.enable_interactive_recording = enable_interactive_recording
+        self.copy_to_clipboard = copy_to_clipboard
 
     def pre_hook(self) -> AgnoPreHook:
         """Get the pre-hook for transcription.
@@ -500,6 +559,7 @@ class TranscriptionHooksConfig:
             effort=self.effort,
             async_hooks=not self.async_hooks,
             enable_interactive_recording=self.enable_interactive_recording,
+            copy_to_clipboard=self.copy_to_clipboard,
         )
 
 
@@ -512,6 +572,7 @@ def _create_transcription_hook(
     effort: float,
     async_hooks: bool = True,
     enable_interactive_recording: bool = False,
+    copy_to_clipboard: bool = False,
 ) -> AgnoPreHook:
     """Create transcription hook.
 
@@ -523,6 +584,8 @@ def _create_transcription_hook(
         max_segments: Maximum number of segments to include
         effort: Transcription effort level (0.0-1.0)
         async_hooks: If True, returns a sync hook that runs async logic synchronously
+        enable_interactive_recording: If True, enables interactive recording when no audio
+        copy_to_clipboard: If True, copies the plain transcription text to clipboard
 
     Returns:
         Hook function (async or sync based on async_hooks parameter)
@@ -585,6 +648,21 @@ def _create_transcription_hook(
                                 transcription_dir,
                             )
                     transcripts.append(result)
+
+            # Copy plain text to clipboard if enabled
+            if copy_to_clipboard and transcripts:
+                # Combine all transcript texts into clean plain text
+                plain_text_parts: list[str] = []
+                for transcript in transcripts:
+                    if transcript.text:
+                        plain_text_parts.append(transcript.text.strip())
+
+                if plain_text_parts:
+                    combined_text = " ".join(plain_text_parts)
+                    if _copy_to_clipboard(combined_text):
+                        log_debug(f"Copied transcription to clipboard ({len(combined_text)} chars)")
+                    else:
+                        log_warning("Failed to copy transcription to clipboard")
 
             _format_and_inject_transcripts(run_input, transcripts, max_segments)
 

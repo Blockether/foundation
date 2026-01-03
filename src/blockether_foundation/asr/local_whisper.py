@@ -254,7 +254,7 @@ class LocalWhisperAudioTranscriber:
                 container.close()
             if audio_stream is not None:
                 audio_stream.close()
-            return False
+            return False  # noqa: B012
 
     async def _transcribe_with_splitting(
         self, audio: bytes, beam_size: int, language: str | None = None
