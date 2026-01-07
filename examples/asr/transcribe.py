@@ -6,19 +6,15 @@ This script processes all audio files in the input/ directory and transcribes th
 It saves the transcription results as JSON files in the same directory.
 
 Usage:
-    python examples/transcribe_audios.py --participants "Alice and Bob" --context "Alice's friend Charlie is sometimes mentioned"
-    python examples/transcribe_audios.py --input-dir my_audios/
+    python examples/transcribe.py --participants "Alice and Bob" --context "Alice's friend Charlie is sometimes mentioned"
+    python examples/transcribe.py --input-dir my_audios/
 """
 
 import argparse
 import asyncio
 import logging
 import os
-import sys
 from pathlib import Path
-
-# Add the src directory to the path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from agno.models.openai import OpenAIChat
 

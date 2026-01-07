@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import shutil
 import subprocess
 import sys
@@ -25,6 +24,9 @@ from ...asr import (
 from ...utils import (
     AgnoPreHook,
     save_data_to_json_file,
+)
+from ...utils import (
+    copy_to_clipboard as copy_to_clipboard_fn,
 )
 
 if TYPE_CHECKING:
@@ -205,63 +207,6 @@ async def _save_transcription_to_file(
 
     # Save using utility function
     save_data_to_json_file(transcription_data, output_file)
-
-
-def _copy_to_clipboard(text: str) -> bool:
-    """Copy text to clipboard using platform-specific commands.
-
-    Args:
-        text: The text to copy to clipboard
-
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        if sys.platform == "darwin":
-            # macOS
-            process = subprocess.Popen(
-                ["pbcopy"],
-                stdin=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            process.communicate(input=text.encode("utf-8"))
-            return process.returncode == 0
-
-        elif sys.platform == "linux":
-            # Linux - try xclip first, then xsel
-            for cmd in [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]:
-                if shutil.which(cmd[0]):
-                    process = subprocess.Popen(
-                        cmd,
-                        stdin=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    )
-                    process.communicate(input=text.encode("utf-8"))
-                    if process.returncode == 0:
-                        return True
-            log_warning(
-                "No clipboard tool found on Linux. "
-                "Install xclip (apt install xclip) or xsel (apt install xsel)"
-            )
-            return False
-
-        elif sys.platform == "win32":
-            # Windows
-            process = subprocess.Popen(
-                ["clip"],
-                stdin=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            process.communicate(input=text.encode("utf-16-le"))
-            return process.returncode == 0
-
-        else:
-            log_warning(f"Clipboard not supported on platform: {sys.platform}")
-            return False
-
-    except Exception as e:
-        log_warning(f"Failed to copy to clipboard: {e}")
-        return False
 
 
 def _wait_for_spacebar() -> None:
@@ -659,7 +604,7 @@ def _create_transcription_hook(
 
                 if plain_text_parts:
                     combined_text = " ".join(plain_text_parts)
-                    if _copy_to_clipboard(combined_text):
+                    if copy_to_clipboard_fn(combined_text):
                         log_debug(f"Copied transcription to clipboard ({len(combined_text)} chars)")
                     else:
                         log_warning("Failed to copy transcription to clipboard")

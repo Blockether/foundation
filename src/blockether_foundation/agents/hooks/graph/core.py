@@ -38,6 +38,7 @@ from ....utils import (
     create_agent_with_instructions,
     execute_agent_async,
     execute_agent_sync,
+    format_main_agent_context,
     inject_context_to_run_input,
 )
 from .common import GraphHookIterativeConfig, GraphIngestionIterativeConfig
@@ -142,9 +143,12 @@ async def _fix_empty_queries_with_agent(
     Returns:
         Fixed LLMGraphQueryOperations or None if fixing failed
     """
+    # Get main agent context
+    main_agent_context = format_main_agent_context(agent)
+
     fix_agent = Agent(
         description="Expert at fixing graph queries that returned no results",
-        instructions=FIX_EMPTY_QUERIES_INSTRUCTIONS,
+        instructions=f"{main_agent_context}\n\n{FIX_EMPTY_QUERIES_INSTRUCTIONS}",
         output_schema=LLMGraphQueryOperations,
         model=agent.model,
         debug_mode=debug_mode or False,
@@ -259,10 +263,13 @@ def create_pre_graph_database_hook(
             graph, limit=20, max_rels_per_entity=3, max_content_length=50
         )
 
+        # Get main agent context
+        main_agent_context = format_main_agent_context(agent)
+
         # Create agent to generate graph queries (max 3)
         query_agent = create_agent_with_instructions(
             description=QUERY_GENERATION_DESCRIPTION,
-            instructions=get_query_generation_instructions(existing_entities, config.max_queries),
+            instructions=f"{main_agent_context}\n\n{get_query_generation_instructions(existing_entities, config.max_queries)}",
             expected_output=QUERY_GENERATION_EXPECTED_OUTPUT,
             output_schema=LLMGraphQueryOperations,
             model=agent.model,
@@ -631,9 +638,12 @@ async def _fix_operations_with_agent(
     Returns:
         Fixed LLMGraphOperations or None if fixing failed
     """
+    # Get main agent context
+    main_agent_context = format_main_agent_context(agent)
+
     fix_agent = Agent(
         description="Expert at fixing graph operation validation errors",
-        instructions=FIX_OPERATIONS_INSTRUCTIONS,
+        instructions=f"{main_agent_context}\n\n{FIX_OPERATIONS_INSTRUCTIONS}",
         output_schema=LLMGraphOperations,
         model=agent.model,
         debug_mode=debug_mode or False,
@@ -726,11 +736,14 @@ def create_post_graph_database_hook(
             graph, limit=30, max_rels_per_entity=5, max_content_length=100
         )
 
+        # Get main agent context
+        main_agent_context = format_main_agent_context(agent)
+
         # Single extraction agent with self-assessment
         extraction_prompt = get_extraction_prompt(existing_entities_context)
         extraction_agent = create_agent_with_instructions(
             description="Knowledge extractor with self-assessment.",
-            instructions=extraction_prompt,
+            instructions=f"{main_agent_context}\n\n{extraction_prompt}",
             expected_output="Extract entities/relationships and self-assess quality.",
             output_schema=LLMGraphOperations,
             model=agent.model,

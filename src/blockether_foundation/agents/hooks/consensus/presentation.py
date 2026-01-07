@@ -70,24 +70,20 @@ def _generate_step_navigation() -> str:
                 <span class="step-number">3</span>
                 <span>Results</span>
             </div>
-            <div class="step-item" data-step-target="summary">
-                <span class="step-number">4</span>
-                <span>Results Summary</span>
-            </div>
             <div class="step-item" data-step-target="gossip">
-                <span class="step-number">5</span>
+                <span class="step-number">4</span>
                 <span>Gossip</span>
             </div>
             <div class="step-item" data-step-target="evaluation">
-                <span class="step-number">6</span>
+                <span class="step-number">5</span>
                 <span>Evaluation</span>
             </div>
             <div class="step-item" data-step-target="conflicts">
-                <span class="step-number">7</span>
+                <span class="step-number">6</span>
                 <span>Conflicts Resolution</span>
             </div>
             <div class="step-item" data-step-target="decision">
-                <span class="step-number">8</span>
+                <span class="step-number">7</span>
                 <span>Decision</span>
             </div>
         </div>
@@ -120,7 +116,7 @@ def _generate_judge_criteria_section(result: ConsensusResult) -> str:
                     <div class="flex-1">
                         <div class="flex items-center gap-2 mb-2">
                             <span class="font-semibold text-gray-900">{html.escape(jc.name)}</span>
-                            <span class="status-badge" style="background: {GRAY_100}; color: {GRAY_700};">Weight: {jc.weight:.1f}</span>
+                            <span class="status-badge" style="background: {GRAY_100}; color: {GRAY_700};">Weight: {(f"{jc.weight:.1f}" if jc.weight is not None else "N/A")}</span>
                         </div>
                         <p class="text-sm text-gray-600">{html.escape(jc.description)}</p>
                     </div>
@@ -153,8 +149,8 @@ def _generate_summary_section(result: ConsensusResult) -> str:
         "\n".join(
             f'<div class="mb-3 p-2 border-l-2 border-green-400">'
             f'<div class="font-medium text-sm">• {html.escape(a.point)}</div>'
-            f'<div class="text-xs text-gray-500 mt-1">{html.escape(a.reasoning)}</div>'
-            f'<div class="text-xs text-gray-400 mt-1">Confidence: {a.confidence:.0%}</div>'
+            f'<div class="text-xs text-gray-500 mt-1">{html.escape(a.reasoning or "")}</div>'
+            f'<div class="text-xs text-gray-400 mt-1">Confidence: {(f"{a.confidence:.0%}" if a.confidence is not None else "N/A")}</div>'
             f"</div>"
             for a in result.key_agreements
         )
@@ -179,9 +175,13 @@ def _generate_summary_section(result: ConsensusResult) -> str:
         "\n".join(
             f'<div class="mb-3 p-2 border-l-2 border-gray-300">'
             f'<div class="font-medium text-sm">• {html.escape(u.area)}</div>'
-            f'<div class="text-xs text-gray-500 mt-1">{html.escape(u.reasoning)}</div>'
-            if u.reasoning
-            else f'<div class="text-xs text-gray-400 mt-1">importance: {u.importance:.0%}</div></div>'
+            + (
+                f'<div class="text-xs text-gray-500 mt-1">{html.escape(u.reasoning)}</div>'
+                if u.reasoning
+                else ""
+            )
+            + f'<div class="text-xs text-gray-400 mt-1">Importance: {(f"{u.importance:.0%}" if u.importance is not None else "N/A")}</div>'
+            f"</div>"
             for u in result.remaining_uncertainties
         )
         if result.remaining_uncertainties
@@ -281,8 +281,7 @@ def _generate_raw_outputs_section(result: ConsensusResult) -> str:
             for a in gen_output.assumptions:
                 assumptions_list.append(
                     f'<li class="flex items-start gap-2 py-1"><span class="text-gray-400">-</span>'
-                    f'<span class="text-xs text-gray-500">({a.importance:.0%})</span> '
-                    f"<span>{html.escape(a.assumption)}</span></li>"
+                    f"<span>{html.escape(a)}</span></li>"
                 )
             assumptions_html = f"""                <div class="mt-3 pt-3 border-t border-gray-200">
                     <h4 class="text-xs font-semibold text-gray-700 mb-2">Assumptions ({len(gen_output.assumptions)})</h4>
@@ -297,7 +296,7 @@ def _generate_raw_outputs_section(result: ConsensusResult) -> str:
             for a in gen_output.considered_alternatives:
                 alternatives_list.append(f"""<li class="border border-gray-200 p-3">
                     <div class="font-medium text-gray-900 text-sm">{html.escape(a.approach)}</div>
-                    <div class="text-xs text-gray-500 mt-1">Value: {a.potential_value:.0%}</div>
+                    <div class="text-xs text-gray-500 mt-1">Value: {(f"{a.potential_value:.0%}" if a.potential_value is not None else "N/A")}</div>
                     <div class="text-xs text-gray-600 mt-1 italic">{html.escape(a.why_not_chosen or "N/A")}</div>
                 </li>""")
             alternatives_html = f"""                <div class="mt-3 pt-3 border-t border-gray-200">
@@ -359,10 +358,12 @@ def _generate_raw_outputs_section(result: ConsensusResult) -> str:
                 f'<span class="text-gray-500">+</span>'
                 f"<div>"
                 f'<span class="font-medium">{html.escape(i.insight)}</span>'
-                f'<div class="text-xs text-gray-500 mt-1">{html.escape(i.reasoning)}</div>'
-                if i.reasoning
-                else ""
-                f'<div class="text-xs text-gray-400">importance: {i.importance:.0%}{f" | Evidence: {html.escape(i.evidence)}" if i.evidence else ""}</div>'
+                + (
+                    f'<div class="text-xs text-gray-500 mt-1">{html.escape(i.reasoning)}</div>'
+                    if i.reasoning
+                    else ""
+                )
+                + f'<div class="text-xs text-gray-400">Importance: {(f"{i.importance:.0%}" if i.importance is not None else "N/A")}{f" | Evidence: {html.escape(i.evidence)}" if i.evidence else ""}</div>'
                 f"</div>"
                 f"</li>"
                 for i in gen_output.key_insights
@@ -406,8 +407,9 @@ def _generate_raw_outputs_section(result: ConsensusResult) -> str:
     </section>"""
 
 
+
 def _generate_critique_matrix_section(result: ConsensusResult) -> str:
-    """Generate critique matrix visualization showing strengths/weaknesses between models."""
+    """Generate critique matrix visualization showing strengths/weaknesses between models with verified claims."""
     if not result.critique_matrix:
         return ""
 
@@ -431,7 +433,7 @@ def _generate_critique_matrix_section(result: ConsensusResult) -> str:
         if cs.flawed_assumptions:
             fa = cs.flawed_assumptions[0]
             summary_parts.append(
-                f"<strong>!</strong> {html.escape(fa.assumption)} ({fa.importance:.0%} importance)"
+                f"<strong>!</strong> {html.escape(fa.assumption)} ({(f'{fa.importance:.0%}' if fa.importance is not None else 'N/A')} importance)"
             )
 
         summary_text = (
@@ -506,7 +508,7 @@ def _generate_judge_results_section(result: ConsensusResult) -> str:
                             <span class="font-medium text-gray-900">{html.escape(v.criterion_name)}</span>
                             <span class="status-badge" style="background: {GRAY_200}; color: {GRAY_700};">{"Pass" if v.passed else "Fail"}</span>
                         </div>
-                        <span class="text-lg font-bold" style="color: {_get_score_color(v.score)}">{v.score:.0%}</span>
+                        <span class="text-lg font-bold" style="color: {_get_score_color(v.score)}">{(f"{v.score:.0%}" if v.score is not None else "N/A")}</span>
                     </div>
                     <p class="text-sm text-gray-600">{html.escape(v.reasoning)}</p>"""
             ]
@@ -516,8 +518,12 @@ def _generate_judge_results_section(result: ConsensusResult) -> str:
                     f'<span class="text-gray-600">-</span>'
                     f"<div>"
                     f'<span class="text-sm font-medium">{html.escape(i.issue)}</span>'
-                    f'<div class="text-xs text-gray-500">{html.escape(i.reasoning)}</div>'
-                    f'<div class="text-xs text-gray-400">Severity: {i.severity:.0%}</div>'
+                    + (
+                        f'<div class="text-xs text-gray-500">{html.escape(i.reasoning)}</div>'
+                        if i.reasoning
+                        else ""
+                    )
+                    + f'<div class="text-xs text-gray-400">Severity: {(f"{i.importance:.0%}" if i.importance is not None else "N/A")}</div>'
                     f"</div>"
                     f"</li>"
                     for i in v.specific_issues
@@ -532,10 +538,12 @@ def _generate_judge_results_section(result: ConsensusResult) -> str:
                     f'<span class="text-gray-600">-></span>'
                     f"<div>"
                     f'<span class="text-sm font-medium">{html.escape(s.suggestion)}</span>'
-                    f'<div class="text-xs text-gray-500">{html.escape(s.reasoning)}</div>'
-                    if s.reasoning
-                    else ""
-                    f'<div class="text-xs text-gray-400">Expected importance: {s.importance:.0%}</div>'
+                    + (
+                        f'<div class="text-xs text-gray-500">{html.escape(s.reasoning)}</div>'
+                        if s.reasoning
+                        else ""
+                    )
+                    + f'<div class="text-xs text-gray-400">Expected impact: {(f"{s.importance:.0%}" if s.importance is not None else "N/A")}</div>'
                     f"</div>"
                     f"</li>"
                     for s in v.improvement_suggestions
@@ -551,14 +559,43 @@ def _generate_judge_results_section(result: ConsensusResult) -> str:
         if jr.refinement_actions:
             actions_list: list[str] = []
             for ra in jr.refinement_actions:
+                status_icon = "✓" if ra.was_addressed else "✗"
+                status_color = "green" if ra.was_addressed else "red"
+                importance_badge = (
+                    f"Severity: {(f'{ra.importance:.0%}' if ra.importance is not None else 'N/A')}"
+                )
+
+                action_parts = [
+                    f'<span style="color: {status_color}; font-weight: bold;">{status_icon}</span>',
+                    f'<span class="font-medium text-gray-900">{html.escape(ra.criterion_name)}</span>',
+                    f'<span class="status-badge" style="background: {GRAY_200}; color: {GRAY_700};">{importance_badge}</span>',
+                ]
+
+                if ra.was_addressed:
+                    if ra.reasoning:
+                        action_parts.append(
+                            f'<span class="text-sm text-gray-700">{html.escape(ra.reasoning)}</span>'
+                        )
+                    if ra.changes_made:
+                        action_parts.append(
+                            f'<span class="text-xs text-gray-500 italic">{html.escape(ra.changes_made)}</span>'
+                        )
+                else:
+                    if ra.reasoning:
+                        action_parts.append(
+                            f'<span class="text-sm text-gray-600">{html.escape(ra.reasoning)}</span>'
+                        )
+
                 actions_list.append(
-                    f'<li class="flex items-start gap-2 py-1"><span class="text-gray-600">-></span>'
-                    f'<span class="text-sm"><span class="font-medium text-gray-900">{html.escape(ra.issue_addressed)}:</span> '
-                    f"{html.escape(ra.action_taken)}</span></li>"
+                    f'<li class="flex items-start gap-2 py-2 border-l-2" style="border-color: {status_color if ra.was_addressed else GRAY_400}">'
+                    f'<div class="flex-1 space-y-1">'
+                    f"{' '.join(action_parts)}"
+                    f"</div>"
+                    f"</li>"
                 )
             refinements_html = f"""                <div class="mt-4 p-3 bg-gray-50">
-                    <h4 class="text-sm font-semibold text-gray-800 mb-2">Refinements Applied</h4>
-                    <ul class="space-y-3 text-sm text-gray-700">
+                    <h4 class="text-sm font-semibold text-gray-800 mb-2">Refinement Actions ({len(jr.refinement_actions)} issues)</h4>
+                    <ul class="space-y-2">
                         {"".join(actions_list)}
                     </ul>
                 </div>"""

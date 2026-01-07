@@ -7,6 +7,9 @@ import json
 import logging
 import re
 import secrets
+import shutil
+import subprocess
+import sys
 from collections.abc import Callable, Coroutine
 from dataclasses import fields
 from pathlib import Path
@@ -508,3 +511,113 @@ def normalize_text_for_tts(text: str) -> str:
         text += "."
 
     return text
+
+
+def copy_to_clipboard(text: str) -> bool:
+    """Copy text to clipboard using platform-specific commands.
+
+    Args:
+        text: The text to copy to clipboard
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        if sys.platform == "darwin":
+            process = subprocess.Popen(
+                ["pbcopy"],
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            process.communicate(input=text.encode("utf-8"))
+            return process.returncode == 0
+
+        elif sys.platform == "linux":
+            for cmd in [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]:
+                if shutil.which(cmd[0]):
+                    process = subprocess.Popen(
+                        cmd,
+                        stdin=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    process.communicate(input=text.encode("utf-8"))
+                    if process.returncode == 0:
+                        return True
+            logger.warning(
+                "No clipboard tool found on Linux. "
+                "Install xclip (apt install xclip) or xsel (apt install xsel)"
+            )
+            return False
+
+        elif sys.platform == "win32":
+            process = subprocess.Popen(
+                ["clip"],
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            process.communicate(input=text.encode("utf-16-le"))
+            return process.returncode == 0
+
+        else:
+            logger.warning(f"Clipboard not supported on platform: {sys.platform}")
+            return False
+
+    except Exception as e:
+        logger.warning(f"Failed to copy to clipboard: {e}")
+        return False
+
+
+def format_main_agent_context(agent: Agent | Team) -> str:
+    """Format the main agent's instructions and expected_output for subprocess agents.
+
+    This extracts the parent agent/team context and formats it as XML for injection
+    into subprocess agents' instructions. This ensures that subprocess agents (like
+    those in consensus, graph, or other multi-agent workflows) are aware of and
+    respect the main agent's purpose and expected output format.
+
+    Args:
+        agent: The main Agent or Team object to extract context from.
+
+    Returns:
+        Formatted XML string with main agent instructions and expected_output.
+    """
+    parts = [
+        "<main_agent_context>",
+        "    <!--",
+        "    IMPORTANT: This subprocess is running on behalf of another agent/team.",
+        "    The following are the main agent's instructions and expected output format.",
+        "    You MUST respect and incorporate this context into your work:",
+        "    - Follow the main agent's instructions when performing your specific task",
+        "    - Align your output with the expected_output format/style if specified",
+        "    - Maintain consistency with the main agent's role and expertise domain",
+        "    -->",
+    ]
+
+    # Add instructions if available
+    instructions = getattr(agent, "instructions", None)
+    instructions_text = ""
+    if isinstance(instructions, str):
+        instructions_text = instructions
+    elif isinstance(instructions, list):
+        # Ensure all elements are strings before joining
+        instructions_strs = [str(i) for i in instructions if isinstance(i, str)]  # type: ignore
+        instructions_text = "\n".join(instructions_strs)
+    if instructions_text:
+        parts.append("    <main_agent_instructions>")
+        indented_instructions = "\n".join(
+            f"        {line}" if line.strip() else "" for line in instructions_text.split("\n")
+        )
+        parts.append(indented_instructions)
+        parts.append("    </main_agent_instructions>")
+
+    expected_output = agent.expected_output if hasattr(agent, "expected_output") else None
+    if expected_output:
+        parts.append("    <main_agent_expected_output>")
+        indented_output = "\n".join(
+            f"        {line}" if line.strip() else "" for line in str(expected_output).split("\n")
+        )
+        parts.append(indented_output)
+        parts.append("    </main_agent_expected_output>")
+
+    parts.append("</main_agent_context>")
+    return "\n".join(parts)

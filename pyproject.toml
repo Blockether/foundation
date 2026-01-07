@@ -16,6 +16,7 @@ dependencies = [
     "agno>=2.3.21",
     "sqlalchemy>=2.0.45",
     "numpy>=2.2.6",
+    "baml-py>=0.216.0",
 ]
 
 [project.optional-dependencies]

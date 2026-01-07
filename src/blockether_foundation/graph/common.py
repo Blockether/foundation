@@ -23,7 +23,6 @@ ENTITY_TYPE_DEFINITIONS: dict[str, str] = {
     "abbreviation": "Shortened forms, acronyms, or initialisms representing longer terms.",
     "reference": "Citations, links, or pointers to other entities, documents, or sources.",
     "memory": "Stored experiences, learned information, or recollections.",
-    "situation": "Complete contexts, specific incidents, environmental factors, or circumstances.",
     "fact": "Specific, verifiable statements or pieces of information about entities.",
 }
 

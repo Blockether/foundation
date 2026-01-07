@@ -228,13 +228,6 @@ class Zhipu(OpenAILike):
 
         assistant_message.metrics.start_timer()
 
-        # Use agno's standard logging system - basic logging handled by base.py
-        if self.request_params:
-            log_debug(
-                f"Calling {self.provider} with request parameters: {self.request_params}",
-                log_level=2,
-            )
-
         # Execute async request
         response = await super().ainvoke(
             messages=messages,
@@ -273,13 +266,6 @@ class Zhipu(OpenAILike):
             run_response.metrics.set_time_to_first_token()
 
         assistant_message.metrics.start_timer()
-
-        # Use agno's standard logging system - basic logging handled by base.py
-        if self.request_params:
-            log_debug(
-                f"Calling {self.provider} with request parameters: {self.request_params}",
-                log_level=2,
-            )
 
         # Execute async streaming request
         response_stream = super().ainvoke_stream(

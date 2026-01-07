@@ -1,133 +1,149 @@
-# Project Guidelines
+# General context
 
-> **IMPORTANT:** `GEMINI.md` and `AGENTS.md` are symlinks to this file (`CLAUDE.md`). Always edit `CLAUDE.md` directly when updating project guidelines.
+## Project Overview
 
-<skills_system priority="1">
+Python 3.13+ project using `uv` for package management. Source code in `src/blockether_foundation/`, tests in `tests/unit/` and `tests/integration/`.
 
-## Available Skills
+## Package Management
 
-<!-- SKILLS_TABLE_START -->
-<usage>
-When users ask you to perform tasks, check if any of the available skills below can help complete the task more effectively. Skills provide specialized capabilities and domain knowledge.
+**Use uv only.** All dependency management goes through `pyproject.toml`.
 
-How to use skills:
-- Invoke: Bash("openskills read <skill-name>")
-- The skill content will load with detailed instructions on how to complete the task
-- Base directory provided in output for resolving bundled resources (references/, scripts/, assets/)
+```bash
+# Install dependencies
+uv sync --all-extras
 
-Usage notes:
-- Only use skills listed in <available_skills> below
-- Do not invoke a skill that is already loaded in your context
-- Each skill invocation is stateless
-</usage>
+# Add a dependency
+uv add package-name
 
-<available_skills>
-
-<skill>
-<name>skill-creator</name>
-<description>Guide for creating effective skills. This skill should be used when users want to create a new skill (or update an existing skill) that extends Claude's capabilities with specialized knowledge, workflows, or tool integrations.</description>
-<location>project</location>
-</skill>
-
-</available_skills>
-<!-- SKILLS_TABLE_END -->
-
-</skills_system>
-
-## Optional Dependencies
-
-When adding features that require optional dependencies (e.g., local ASR, ML libraries), follow this pattern:
-
-### 1. Define optional dependency group in `pyproject.toml`
-
-```toml
-[project.optional-dependencies]
-feature_name = [
-    "package>=version",
-    "another-package>=version",
-]
+# Run commands in venv
+uv run <command>
 ```
 
-### 2. Use `importlib.metadata` to check availability
+## Inspecting Library Code
 
-Check if the main package is installed using package metadata (NOT try/except imports):
+When you need to understand how a library works, you can read its source code directly:
+
+```bash
+# Path to installed packages
+.venv/lib/python3.13/site-packages/[library-name]/
+```
+
+Example: `read .venv/lib/python3.13/site-packages/requests/sessions.py`
+
+## Running Tests
+
+### Run all tests
+```bash
+uv run pytest
+```
+
+### Run single test file
+```bash
+uv run pytest tests/path/to/test_file.py
+```
+
+### Run specific test
+```bash
+uv run pytest tests/path/to/test_file.py::test_function_name
+```
+
+### With markers
+```bash
+# Run unit tests (default)
+uv run pytest -m unit
+
+# Run integration tests
+uv run pytest -m integration
+
+# Run async tests
+uv run pytest -m asyncio
+```
+
+Available markers: `unit`, `integration`, `agno_eval`, `performance_test`, `slow`, `asyncio`
+
+## Quality Tools
+
+```bash
+# Linting and formatting (ruff)
+uv run ruff check .
+uv run ruff format .
+
+# Type checking (pyright)
+uv run pyright src/
+```
+
+## Task Runner
+
+Use `poe` for common tasks:
+```bash
+uv run poe lint
+uv run poe test
+uv run poe test-integration
+```
+
+## Core Utilities
+
+### Concurrency (`src/blockether_foundation/concurrency.py`)
+
+Use `ConcurrentProcessor` for concurrent batch processing with automatic retry logic:
 
 ```python
-# Check if feature dependencies are installed
-try:
-    from importlib.metadata import version
-    version("package_name")
-    FEATURE_AVAILABLE = True
-except Exception:
-    FEATURE_AVAILABLE = False
+from blockether_foundation.concurrency import ConcurrentProcessor
+
+processor = ConcurrentProcessor(
+    concurrency=5,           # Max parallel operations
+    max_retries=3,           # Retry attempts
+    retry_min_wait=3500,    # Min wait between retries (ms)
+    retry_max_wait=15000,   # Max wait between retries (ms)
+)
+
+results = await processor.process(items, processor_fn)
 ```
 
-**Why:** This is a single, deterministic check. If the main package is installed, its dependencies will be too.
+Guarantees:
+- Order preservation (results returned in same order as inputs)
+- Atomic processing (all items succeed or all fail)
+- Exponential backoff retry logic
 
-### 3. Use lazy `__getattr__` for exports
+**Important**: When returning multiple values from processor_fn, wrap tuples as lists:
+```python
+# Correct
+async def processor_fn(item) -> list[Output]:
+    return [result1, result2]
 
-Never import optional dependencies at module level in `__init__.py`. Use `__getattr__`:
+# Also works (tuples are treated as sequences)
+async def processor_fn(item) -> tuple[Output, ...]:
+    return (result1, result2)
+```
+
+### Error Handling (`src/blockether_foundation/result.py`)
+
+Use `Result[T, E]` for explicit error handling (Rust-like):
 
 ```python
-# __init__.py
-from . import feature_module
+from blockether_foundation.result import Result
+from blockether_foundation.errors import FoundationBaseError
 
-__all__ = ["FeatureClass", "FEATURE_AVAILABLE"]
+# Create results
+result = Result.Ok(value)
+result = Result.Err(error)
 
-def __getattr__(name: str):
-    if name == "FeatureClass":
-        return feature_module.FeatureClass
-    if name == "FEATURE_AVAILABLE":
-        return feature_module.FEATURE_AVAILABLE
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+# Extract values
+value = result.unwrap()               # Raises if Err
+value = result.unwrap_or(default)     # Returns default if Err
+value = result.expect("message")      # Raises with custom message
+
+# Chain operations
+result.map(transform_fn)              # Transform Ok value
+result.and_then(lambda x: ...)        # Chain Result-returning operations
+result.or_else(lambda e: ...)         # Provide fallback if Err
 ```
 
-**Why:** This allows the package to be imported without the optional dependencies present. Imports only happen when the attribute is actually accessed.
+## Code Conventions
 
-**Important Note for Type Annotations:**
-When using optional dependencies in function type signatures (outside of `TYPE_CHECKING` blocks), use string literal type annotations to avoid `NameError` at module import time:
-
-```python
-# ❌ WRONG - This will fail at import time if LocalWhisperAudioTranscriber isn't imported yet
-def my_func(audio_transcriber: LocalWhisperAudioTranscriber | None = None):
-    ...
-
-# ✅ CORRECT - String literal avoids the NameError
-def my_func(audio_transcriber: "LocalWhisperAudioTranscriber | None" = None):
-    ...
-```
-
-### 4. Provide helpful error messages
-
-    Create a helper function that raises ImportError with installation instructions:
-
-    ```python
-    def _check_feature_available() -> None:
-        if not FEATURE_AVAILABLE:
-            raise ImportError(
-                "Feature dependencies are not installed. "
-                "Install them with: uv pip install 'blockether-foundation[feature_name]'"
-            )
-    ```
-
-    Call this in `__init__` methods and functions that require the optional dependencies.
-
-### 5. Always use `uv` for dependency management
-
-    This project uses `uv` for Python package management. Always use `uv` commands instead of `pip`:
-
-    ```bash
-    # Install all dependencies including optional extras for development
-    uv sync --all-extras
-
-    # Install specific optional dependency group
-    uv pip install 'blockether-foundation[feature_name]'
-
-    # Update dependencies
-    uv sync
-
-    # Add a new dependency
-    uv add package-name
-    ```
-
-    **Why:** `uv` is significantly faster than `pip` and provides better dependency resolution, especially for projects with optional dependencies and dev extras.
+- Type hints required (checked by pyright)
+- Use async/await for I/O operations
+- Follow ruff formatting
+- Write tests for new features
+- Use `Result` for explicit error handling
+- Use `ConcurrentProcessor` for batch concurrent operations

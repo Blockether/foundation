@@ -1,7 +1,6 @@
 """Consensus hooks for Agno agents - Multi-model agreement through structured rounds."""
 
 from blockether_foundation.agents.hooks.consensus.core import (
-    Assumption,
     ConfidenceBreakdown,
     ConflictResolution,
     ConsensusHooksConfig,
@@ -28,7 +27,6 @@ from blockether_foundation.agents.hooks.consensus.presentation import (
 )
 
 __all__ = [
-    "Assumption",
     "ConfidenceBreakdown",
     "ConflictResolution",
     "ConsensusHooksConfig",

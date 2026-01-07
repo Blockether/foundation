@@ -3,14 +3,14 @@
 Research Agent with Consensus Pre-Hook
 
 This example demonstrates an agent that:
-1. Uses multi-model consensus for research and initial analysis via opencode CLI
+1. Uses multi-model consensus for research and initial analysis via claude CLI
 2. Transcribes incoming audio using LocalWhisperAudioTranscriber
 3. Generates audio responses using PiperTTS
 4. Auto-plays synthesized audio using platform-specific audio commands
 
-The consensus pre-hook runs the opencode CLI (Planner-Sisyphus agent) to perform
-research and analysis BEFORE the main agent processes the request. This is a
-RESEARCH-ONLY mode - no code changes are made unless explicitly requested by the user.
+The consensus pre-hook runs the claude CLI to perform research and analysis
+BEFORE the main agent processes the request. This is a RESEARCH-ONLY mode -
+no code changes are made unless explicitly requested by the user.
 
 Usage:
     python examples/researcher.py
@@ -18,16 +18,11 @@ Usage:
 
 import asyncio
 import os
-import subprocess
-from typing import TYPE_CHECKING, cast
 
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.models.openai import OpenAIChat
-from agno.run import RunContext
-from agno.tools import tool  # type: ignore
 from agno.tools.arxiv import ArxivTools
-from agno.tools.crawl4ai import Crawl4aiTools
 from agno.tools.file import FileTools
 from agno.tools.tavily import TavilyTools
 from agno.utils import pprint
@@ -43,6 +38,7 @@ from blockether_foundation.agents.hooks import (
 )
 from blockether_foundation.agents.models.zai import Zhipu
 from blockether_foundation.agents.toolkits import GoalToolkit
+from blockether_foundation.agents.toolkits.claude import ClaudeToolkit
 from blockether_foundation.asr import LocalWhisperAudioTranscriber
 from blockether_foundation.tts import PIPER_DEFAULT_MODEL, PiperTTS
 
@@ -51,13 +47,8 @@ console = Console()
 
 MODEL_BASE_URL = os.getenv("BLOCKETHER_LLM_API_BASE_URL")
 MODEL_API_KEY = os.getenv("BLOCKETHER_LLM_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-
 if not MODEL_BASE_URL:
     raise ValueError("BLOCKETHER_LLM_API_BASE_URL environment variable is not set.")
-
-if not OPENROUTER_API_KEY:
-    raise ValueError("OPENROUTER_API_KEY environment variable is not set.")
 
 console.print("[dim]Initializing models...[/]")
 
@@ -73,105 +64,6 @@ glm_4_7 = Zhipu(
     enable_coding_plan=True,
     enable_thinking=True,
 )
-
-
-def _execute_opencode(
-    task: str,
-    agent_name: str | None = None,
-    timeout: int = 600,
-) -> str:
-    """
-    Internal function to execute opencode CLI.
-
-    Args:
-        task: The task to execute.
-        agent_name: Optional agent to use.
-        timeout: Timeout in seconds (default: 10 minutes).
-
-    Returns:
-        str: The output from opencode.
-    """
-    agent_info = f" with agent [bold cyan]{agent_name}[/]" if agent_name else ""
-    console.print(f"[dim]Running opencode{agent_info}...[/]")
-    console.print(f"[dim]Task: {task[:100]}...[/]")
-
-    try:
-        cmd = ["opencode", "run", task]
-        if agent_name:
-            cmd = ["opencode", "--agent", agent_name, "run", task]
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-
-        output = result.stdout
-        if result.stderr:
-            output += f"\n\nStderr:\n{result.stderr}"
-
-        if result.returncode != 0:
-            console.print(f"[yellow]opencode returned non-zero exit code: {result.returncode}[/]")
-            output += f"\n\nExit code: {result.returncode}"
-
-        console.print("[green]opencode execution completed[/]")
-        console.print(f"[dim]Output (first 500 chars): {output[:500]}...[/]")
-        return output
-
-    except subprocess.TimeoutExpired:
-        error_msg = f"opencode timed out after {timeout // 60} minutes"
-        console.print(f"[red]{error_msg}[/]")
-        return f"Error: {error_msg}"
-    except FileNotFoundError:
-        error_msg = "opencode CLI not found. Please ensure it is installed and in PATH."
-        console.print(f"[red]{error_msg}[/]")
-        return f"Error: {error_msg}"
-    except Exception as e:
-        error_msg = f"Error running opencode: {e}"
-        console.print(f"[red]{error_msg}[/]")
-        return f"Error: {error_msg}"
-
-
-def run_opencode_research(query: str, agent_name: str = "Planner-Sisyphus") -> str:
-    """
-    Run opencode CLI for research and analysis using a specified agent.
-
-    This tool executes the opencode CLI in research-only mode. It does NOT make
-    any code changes - it only performs analysis and returns findings.
-
-    Args:
-        query: The research query or task to analyze. Should be a clear description
-               of what to research or investigate.
-        agent_name: The opencode agent to use. Defaults to "Planner-Sisyphus" which
-                   is optimized for planning and research tasks.
-
-    Returns:
-        str: The research output from opencode, containing analysis, findings,
-             and recommendations (but NO code changes applied).
-    """
-    return _execute_opencode(task=query, agent_name=agent_name, timeout=600)
-
-
-@tool(requires_confirmation=True)
-def run_opencode(task: str, agent_name: str | None = None) -> str:
-    """
-    Run opencode CLI to execute a programming task.
-
-    REQUIRES USER CONFIRMATION before execution.
-
-    This tool executes the opencode CLI to perform actual code changes and implementation.
-    The user will be prompted to confirm before any changes are made.
-
-    Args:
-        task: The task to execute. Should be a clear description of what to implement,
-              fix, or change in the codebase.
-        agent_name: Optional agent to use. If not specified, uses the default opencode agent.
-
-    Returns:
-        str: The output from opencode, including any changes made to the codebase.
-    """
-    return _execute_opencode(task=task, agent_name=agent_name, timeout=600)
 
 
 async def main():
@@ -203,24 +95,15 @@ async def main():
                 perspective=(
                     "Focus on deep reasoning and systematic analysis. Think through the "
                     "problem step by step, consider edge cases, and provide thorough "
-                    "analysis with coding plan. Use the opencode research tool to gather "
+                    "analysis with coding plan. Use the claude research tool to gather "
                     "detailed information about the codebase and problem space."
                 ),
-            ),
-            ModelConfig(
-                model=glm_4_7,
-                name="ResearchAnalyst",
-                importance=0.25,
-                perspective=(
-                    "Focus on thorough research and comprehensive coverage. Investigate "
-                    "multiple approaches, identify best practices, and provide actionable "
-                    "findings. Use the opencode research tool to explore the codebase."
-                ),
+                tools=[ClaudeToolkit()],
             ),
             ModelConfig(
                 model=glm_4_7,
                 name="QuickPlanner",
-                importance=0.2,
+                importance=0.3,
                 perspective=(
                     "Focus on quick assessment and practical implementation planning. "
                     "Identify the most direct path to solution, flag potential blockers, "
@@ -230,11 +113,11 @@ async def main():
             ModelConfig(
                 model=glm_4_7,
                 name="CodeSpecialist",
-                importance=0.15,
+                importance=0.3,
                 perspective=(
                     "Focus on code quality, best practices, and implementation details. "
                     "Analyze the codebase structure, identify patterns, and provide "
-                    "concrete code solutions. Use the opencode research tool to examine "
+                    "concrete code solutions. Use the claude research tool to examine "
                     "similar implementations in the codebase."
                 ),
             ),
@@ -258,13 +141,16 @@ async def main():
                 weight=1.0,
                 threshold=0.7,
             ),
+            JudgeCriteria(
+                name="DRYness",
+                description="Is the research free of unnecessary repetition across models, providing unique insights? Are the proposed actions non-redundant?",
+                weight=1.0,
+                threshold=0.7,
+            ),
         ],
         triage_model=gpt_4o,
         max_refinement_iterations=2,
         judge_threshold=0.65,
-        tools=[
-            run_opencode_research,
-        ],
     )
 
     transcription_config = TranscriptionHooksConfig(
@@ -335,15 +221,15 @@ async def main():
             "1. Present consensus research findings clearly in spoken language",
             "2. Highlight key insights and recommendations from all three models naturally",
             "3. Ask the user if they want to proceed with any proposed changes",
-            "4. Only use the run_opencode tool if the user EXPLICITLY confirms implementation",
+            "4. Only use the run_claude tool if the user EXPLICITLY confirms implementation",
             "",
             "IMPLEMENTATION TOOL:",
-            "- You have access to the run_opencode tool for executing actual code changes",
+            "- You have access to the run_claude tool for executing actual code changes",
             "- NEVER use this tool unless the user explicitly says 'yes', 'proceed', 'implement', etc.",
             "- Always confirm before executing any implementation",
         ],
         tools=[
-            run_opencode,
+            ClaudeToolkit(),
             GoalToolkit(),
             FileTools(
                 enable_list_files=False,
@@ -386,7 +272,7 @@ async def main():
     console.print(
         "  • [green]Smart triage[/]: Skips consensus for simple requests (greetings, confirmations)"
     )
-    console.print("  • Multi-model consensus via [dim]opencode --agent Planner-Sisyphus[/]")
+    console.print("  • Multi-model consensus via [dim]claude --no-session-persistence -p[/]")
     console.print("  • [yellow]RESEARCH-ONLY[/] by default: No changes without user approval")
     console.print("  • Implementation tool available when user explicitly approves")
     console.print("  • Record audio interactively with SPACEBAR control")

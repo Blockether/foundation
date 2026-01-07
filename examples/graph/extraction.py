@@ -46,10 +46,9 @@ from datetime import datetime
 from pathlib import Path
 
 from agno.agent.agent import Agent
-from agno.models.openai import OpenAIChat
-from agno.utils.log import configure_agno_logging
-from blockether_foundation.agents.models.zai import Zhipu
+
 from blockether_foundation.agents.hooks.graph import GraphHookIterativeConfig, GraphHooksConfig
+from blockether_foundation.agents.models.zai import Zhipu
 from blockether_foundation.graph import GraphDatabase
 
 # Initialize simple logging system
@@ -89,6 +88,16 @@ blockether_model = Zhipu(
 RELATIONSHIP_KNOWLEDGE_EXTRACTOR_PROMPT_TEMPLATE = """
 You are Dr. Schema - a Schema Therapy expert extracting deep psychological knowledge about {partner1} and {partner2}.
 
+CRITICAL ACCURACY RULE (HIGHEST PRIORITY):
+- Do NOT guess, project, or fill in missing details.
+- Do NOT label schemas, modes, attachment styles, “toxic behaviors”, motives, childhood origins, or coping styles unless the conversation segment contains clear, direct evidence.
+- Evidence must be grounded in verbatim quotes or very specific observable behaviors from the text.
+- If the segment is too short / too neutral / lacks evidence, explicitly say so and return "NO_CLEAR_SCHEMA_EVIDENCE".
+- When you do make a claim, include:
+    - 1–3 short quotes (verbatim) that justify it
+    - a confidence level: LOW / MEDIUM / HIGH
+    - what would be needed to confirm (one short question)
+
   CORE REQUIREMENTS:
   1. WHAT HAPPENED: Exact words, behaviors, sequence, emotions, timing
   2. WHY IT HAPPENED: Schema activations, childhood origins, unmet needs, coping styles
@@ -114,7 +123,8 @@ You are Dr. Schema - a Schema Therapy expert extracting deep psychological knowl
   - Conflict patterns and repair attempts
   - Historical patterns and childhood origins
 
-  Create rich, interconnected entities with quotes, emotional intensity, timing. Each situation should have the schema, mode, pattern and trigger attached if applicable! Remember to always extract the knowledge about all of the mentioned people in the conversation.
+    Create rich, interconnected entities with quotes, timing. Attach schema/mode/pattern/trigger ONLY when justified by explicit evidence in the text.
+    Remember to always extract the knowledge about all of the mentioned people in the conversation.
 """
 
 
@@ -312,8 +322,14 @@ async def process_conversations_in_batches(
             if focused_context:
                 # Create enhanced extraction prompt with comprehensive context requirements
                 extraction_prompt = f"""
-    Extract COMPREHENSIVE psychological, emotional, situational knowledge about BOTH {partner1} and {partner2} from this conversation segment denoted as <conversation_segment>with the full context.
-    EXTRACT SPECIFICALLY THE TOXIC BEHVIORS WITH CITATIONS AND DETAILED EXPLANATIONS BASED ON SCHEMA THERAPY PRINCIPLES.
+    Extract psychological and situational knowledge about BOTH {partner1} and {partner2} from the conversation segment denoted as <conversation_segment>.
+
+    HARD CONSTRAINTS:
+    - Do not invent schemas/modes/attachment styles/toxic behaviors.
+    - Only extract items supported by direct evidence in the text.
+    - If you cannot cite at least one short quote for a claim, do not include that claim.
+    - If there is no clear Schema Therapy signal in this segment, respond with exactly: NO_CLEAR_SCHEMA_EVIDENCE
+
     <conversation_segment>
     {focused_context}
     </conversation_segment>
