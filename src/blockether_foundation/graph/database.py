@@ -85,19 +85,23 @@ class QueryResult[T]:
 class GraphDatabase:
     """In-memory graph database with Tantivy search."""
 
-    def __init__(self, tantivy_index_path: str | Path | None = None) -> None:
+    def __init__(self, file_path: str | Path | None = None) -> None:
         """Initialize graph database.
 
         Args:
-            tantivy_index_path: Path to store Tantivy index on disk. If None, index is in-memory only.
+            file_path: Path to JSON file. If exists, loads graph. Tantivy index stored at {file_path}.tantivy_index
         """
         self._index: GraphIndex = GraphIndex()
-        self._tantivy_index: Any | None = None  # Lazy-loaded Tantivy index (optional)
-        self._tantivy_searcher: Any | None = None  # Cache searcher (optional)
+        self._tantivy_index: Any | None = None
+        self._tantivy_searcher: Any | None = None
+        self._file_path: Path | None = Path(file_path) if file_path else None
         self._tantivy_index_path: Path | None = (
-            Path(tantivy_index_path) if tantivy_index_path else None
+            self._file_path.with_suffix(".tantivy_index") if self._file_path else None
         )
         self._next_entity_id: int = 1
+
+        if self._file_path and self._file_path.exists():
+            self._load_from_file_internal(self._file_path)
 
     @property
     def index(self) -> GraphIndex:
@@ -818,12 +822,12 @@ class GraphDatabase:
             self._tantivy_searcher = None
             return
 
-        # Create schema
         schema_builder = tantivy.SchemaBuilder()
         schema_builder.add_text_field("id", stored=True)
         schema_builder.add_text_field("name", stored=True)
         schema_builder.add_text_field("content", stored=True)
         schema_builder.add_text_field("type", stored=True)
+        schema_builder.add_text_field("provenance", stored=True)
         schema = schema_builder.build()
 
         # Create index - either in-memory or on disk
@@ -890,10 +894,9 @@ class GraphDatabase:
                 tantivy.Document(
                     id=[entity.id],
                     name=[entity.name],
-                    content=[
-                        f"{entity.name} {entity.content}"
-                    ],  # Include name in content for search
+                    content=[f"{entity.name} {entity.content}"],
                     type=[entity.type],
+                    provenance=[entity.provenance or ""],
                 )
             )
         writer.commit()
@@ -911,7 +914,6 @@ class GraphDatabase:
         assert self._tantivy_index is not None
         index = cast(Any, self._tantivy_index)
 
-        # Add all documents in one batch for efficiency
         writer = index.writer()
         for entity in entities:
             writer.add_document(
@@ -920,6 +922,7 @@ class GraphDatabase:
                     name=[entity.name],
                     content=[f"{entity.name} {entity.content}"],
                     type=[entity.type],
+                    provenance=[entity.provenance or ""],
                 )
             )
 
@@ -946,13 +949,13 @@ class GraphDatabase:
         delete_query = self._tantivy_index.parse_query(f'"{entity_id}"', ["id"])
         writer.delete_documents_by_query(delete_query)
 
-        # Add updated document
         writer.add_document(
             tantivy.Document(
                 id=[entity.id],
                 name=[entity.name],
                 content=[f"{entity.name} {entity.content}"],
                 type=[entity.type],
+                provenance=[entity.provenance or ""],
             )
         )
 
@@ -996,25 +999,19 @@ class GraphDatabase:
 
     @classmethod
     def from_dict(
-        cls, data: dict[str, object], tantivy_index_path: str | Path | None = None
+        cls, data: dict[str, object], file_path: str | Path | None = None
     ) -> GraphDatabase:
-        """Deserialize graph from dictionary.
-
-        Args:
-            data: Dictionary with entities, relationships, and search index.
-            tantivy_index_path: Path to store/load Tantivy index on disk.
-                               If None, uses saved path from data.
-
-        Returns:
-            Completely restored GraphDatabase with all entities, relationships,
-            and fully functional Tantivy search index.
-        """
-        if tantivy_index_path is None:
-            saved_path = data.get("tantivy_index_path")
+        """Deserialize graph from dictionary."""
+        if file_path is None:
+            saved_path = data.get("file_path")
             if isinstance(saved_path, str):
-                tantivy_index_path = saved_path
+                file_path = saved_path
 
-        db = cls(tantivy_index_path=tantivy_index_path)
+        db = cls()
+        db._file_path = Path(file_path) if file_path else None
+        db._tantivy_index_path = (
+            db._file_path.with_suffix(".tantivy_index") if db._file_path else None
+        )
 
         index_data = data.get("index")
         if index_data and isinstance(index_data, dict):
@@ -1031,72 +1028,56 @@ class GraphDatabase:
 
         return db
 
-    def save_to_file(
-        self,
-        file_path: str | Path,
-        save_tantivy_index: bool = True,
-        tantivy_index_path: str | Path | None = None,
-    ) -> None:
-        """Save graph database to JSON file.
+    def save_to_file(self, file_path: str | Path | None = None) -> None:
+        """Save graph database to JSON file. Tantivy index saved at {file_path}.tantivy_index"""
+        path = Path(file_path) if file_path else self._file_path
+        if not path:
+            raise ValueError("No file_path provided and no default path set")
 
-        Args:
-            file_path: Path to the JSON file where the graph should be saved.
-            save_tantivy_index: If True and using disk-based index, ensures index is saved.
-            tantivy_index_path: Path for Tantivy index. If None and using disk-based index,
-                                defaults to file_path + '.tantivy_index'.
-        """
-        path = Path(file_path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._file_path = path
+        self._tantivy_index_path = path.with_suffix(".tantivy_index")
 
-        # Set Tantivy index path if provided and we don't have one
-        if tantivy_index_path and not self._tantivy_index_path:
-            self._tantivy_index_path = Path(tantivy_index_path)
-
-        # Ensure Tantivy index is saved if we have a disk-based index
-        if save_tantivy_index and self._tantivy_index and self._tantivy_index_path:
-            # Force commit any pending changes
-            try:
-                index = cast(Any, self._tantivy_index)
-                writer = index.writer()
-                writer.commit()
-                writer.wait_merging_threads()
-                index.reload()
-            except Exception:
-                pass  # Ignore save errors
+        if self._tantivy_index:
+            index = cast(Any, self._tantivy_index)
+            writer = index.writer()
+            writer.commit()
+            writer.wait_merging_threads()
+            index.reload()
 
         with path.open("w") as f:
             json.dump(self.to_dict(), f, indent=2, default=str)
 
+    def _load_from_file_internal(self, path: Path) -> None:
+        with path.open("r") as f:
+            data = json.load(f)
+
+        index_data = data.get("index")
+        if index_data and isinstance(index_data, dict):
+            self._index = GraphIndex.from_dict(cast(dict[str, Any], index_data))
+
+        next_entity_id = data.get("next_entity_id")
+        if isinstance(next_entity_id, int):
+            self._next_entity_id = next_entity_id
+        else:
+            self._next_entity_id = (
+                max([int(eid) for eid in self._index.entity_by_id.keys()] or [0]) + 1
+            )
+
+        if self._index.entity_by_id:
+            self._initialize_tantivy_index()
+
     @classmethod
-    def load_from_file(
-        cls, file_path: str | Path, tantivy_index_path: str | Path | None = None
-    ) -> GraphDatabase:
-        """Load graph database from JSON file.
-
-        Args:
-            file_path: Path to the JSON file to load the graph from.
-            tantivy_index_path: Path to store/load Tantivy index on disk.
-                               If None, defaults to file_path + '.tantivy_index'.
-
-        Returns:
-            GraphDatabase instance loaded from file.
-
-        Raises:
-            FileNotFoundError: If the file does not exist.
-        """
+    def load_from_file(cls, file_path: str | Path) -> GraphDatabase:
+        """Load graph database from JSON file."""
         path = Path(file_path)
-
         if not path.exists():
             raise FileNotFoundError(f"Graph file not found: {file_path}")
-
-        # Auto-generate Tantivy index path if not provided
-        if tantivy_index_path is None:
-            tantivy_index_path = path.with_suffix(".tantivy_index")
 
         with path.open("r") as f:
             data = json.load(f)
 
-        return cls.from_dict(data, tantivy_index_path=tantivy_index_path)
+        return cls.from_dict(data, file_path=path)
 
     @property
     def entity_count(self) -> int:

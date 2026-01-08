@@ -102,6 +102,47 @@ The XML format is used by:
 
 Note: The system always preserves the original language of the audio and does
 not translate content during transcription processing.
+
+## TranscriptionResult Serialization
+
+The `TranscriptionResult` class (post-processed transcription with participants
+and dialogue lines) supports XML-based serialization via `to_text()` and `from_text()`:
+
+```xml
+<!--
+  Conversation Transcription
+  This file contains a diarized conversation with speaker labels,
+  timestamps, and participant information. Can be parsed back
+  into a TranscriptionResult object using TranscriptionResult.from_text().
+-->
+
+<transcription>
+  <metadata>
+    <date>08-01-2026</date>
+    <participants>
+      <participant name="Alice" role="Interviewer" />
+      <participant name="Bob" role="Interviewee" />
+    </participants>
+  </metadata>
+  <conversation>
+    <dialog_line speaker="Alice" start="0.500" end="2.300">Hello, how are you?</dialog_line>
+    <dialog_line speaker="Bob" start="2.500" end="4.100">I'm doing great, thanks!</dialog_line>
+  </conversation>
+</transcription>
+```
+
+### Usage
+```python
+# Save to file
+transcription_text = transcription.to_text()
+with open("transcription.txt", "w") as f:
+    f.write(transcription_text)
+
+# Load from file
+from blockether_foundation.agents.transcriber import TranscriptionResult
+with open("transcription.txt") as f:
+    loaded = TranscriptionResult.from_text(f.read())
+```
 """
 
 import glob
@@ -122,6 +163,266 @@ from ..utils import dataclass_copy
 from .hooks import TranscriptionHooksConfig
 
 DEFAULT_OVERLAP = 60.0
+
+
+async def process_audio_file(
+    file_path: str,
+    chunk_duration: float,
+    audio_transcriber: AudioTranscriberProtocol,
+    overlap: float,
+    output_dir: str,
+    input: str | None = None,
+    save_raw_transcription: bool = False,
+    save_dir: str | None = None,
+    save_chunks: bool = False,
+    **agent_kwargs: Any,
+) -> "TranscriptionResult | None":
+    """Process a single audio file with overlap-based chunking.
+
+    Args:
+        file_path: Path to the audio file
+        chunk_duration: Duration of each chunk in seconds
+        overlap: Overlap duration between chunks in seconds
+        output_dir: Directory for output files (used for temp files and raw transcriptions)
+        input: Additional instructions for the agent
+        audio_transcriber: Transcriber instance for raw transcription hooks
+        save_raw_transcription: Whether to save raw transcriptions via hooks
+        save_dir: Directory for raw transcriptions
+        save_chunks: Whether to save individual chunk results to disk
+        **agent_kwargs: Additional arguments for the agent
+
+    Returns:
+        TranscriptionResult if processing succeeded, None otherwise
+    """
+    default_input = "Transcribe given audio."
+    final_input = default_input
+
+    if input:
+        final_input += (
+            "These special instructions should be given HIGHEST priority. "
+            "THESE INSTRUCTIONS OVERRIDE ALL PREVIOUS INSTRUCTIONS IN CASE OF CONFLICT "
+            f"<special_instructions>{input}</special_instructions>"
+        )
+    # Initialize pre_hooks list
+    hooks_list: list[Any] = []
+
+    # Add pre_hooks from parameter if provided
+    if agent_kwargs.get("pre_hooks"):
+        pre_hooks = agent_kwargs.pop("pre_hooks")
+        hooks_list.extend(pre_hooks)
+
+    config = TranscriptionHooksConfig(
+        save_transcriptions=save_raw_transcription,
+        transcriber=audio_transcriber,
+        transcription_dir=save_dir or output_dir,
+    )
+    hooks_list.append(config.pre_hook())
+
+    # Add hooks to agent_kwargs if any
+    if hooks_list:
+        agent_kwargs["pre_hooks"] = hooks_list
+
+    agent = dataclass_copy(TRANSCRIBER_AGENT, **agent_kwargs)
+    try:
+        # Read the audio file
+        with open(file_path, "rb") as f:
+            audio_bytes = f.read()
+
+        # Extract original file metadata
+        original_date = extract_audio_creation_date(file_path)
+
+        # Split audio into overlapping chunks
+        chunks = split_audio_into_chunks(
+            audio_bytes, chunk_duration=chunk_duration, overlap=overlap
+        )
+        base_name = Path(file_path).stem
+
+        log_info(
+            f"Split {file_path} into {len(chunks)} chunks "
+            f"(duration={chunk_duration / 60:.1f}min, overlap={overlap:.0f}s)"
+        )
+
+        async def process_chunk(
+            chunk_data: tuple[bytes, float, float],
+            chunk_index: int,
+            chunks_ref: list[tuple[bytes, float, float]],
+            base_name_ref: str,
+            file_path_ref: str,
+            orig_date: str | None,
+            previous_result: TranscriptionResult | None,
+        ) -> tuple[TranscriptionResult, float, float] | None:
+            """Process a single chunk with the agent.
+
+            Args:
+                chunk_data: Tuple of (audio_bytes, start_time, end_time)
+                chunk_index: Index of this chunk (0-based)
+                chunks_ref: Reference to all chunks list
+                base_name_ref: Base filename
+                file_path_ref: Full file path
+                orig_date: Original file date from metadata
+                previous_result: Transcription result from previous chunk (for context)
+            """
+            chunk_bytes, start_time, end_time = chunk_data
+
+            chunk_duration_actual = end_time - start_time
+            log_info(
+                f"Processing chunk {chunk_index + 1}/{len(chunks_ref)}: "
+                f"{start_time / 60:.1f}min - {end_time / 60:.1f}min ({chunk_duration_actual / 60:.1f}min)"
+            )
+
+            chunk_path = None
+            try:
+                # Create temporary audio chunk
+                chunk_filename = f"{base_name_ref}_chunk_{chunk_index + 1:03d}.wav"
+                chunk_path = os.path.join(output_dir, chunk_filename)
+
+                # Save chunk to temporary file
+                with open(chunk_path, "wb") as chunk_file:
+                    chunk_file.write(chunk_bytes)
+
+                # Build input with context
+                chunk_input = final_input
+
+                # Add original date as context (instead of patching afterward)
+                if orig_date:
+                    chunk_input = (
+                        f"<recording_metadata>\n"
+                        f"  <date>{orig_date}</date>\n"
+                        f"</recording_metadata>\n\n{chunk_input}"
+                    )
+
+                # Add previous chunk's transcription as context for speaker identification
+                if previous_result and chunk_index > 0:
+                    # Format the previous transcription for context
+                    # Include the last portion that corresponds to the overlap
+                    prev_context_lines: list[str] = []
+                    for line in previous_result.conversation[-50:]:  # Last 50 lines for context
+                        prev_context_lines.append(
+                            f'  <line speaker="{line.speaker}" '
+                            f'start="{line.timerange.start:.1f}" '
+                            f'end="{line.timerange.end:.1f}">{line.text}</line>'
+                        )
+
+                    prev_participants = ", ".join(
+                        f"{p.name} ({p.role})" for p in previous_result.participants
+                    )
+
+                    pre_context = (
+                        "<pre_transcription_conversation>\n"
+                        "  <!-- This is the END of the PREVIOUS chunk's transcription -->\n"
+                        "  <!-- Use this ONLY for speaker identification - DO NOT include in output! -->\n"
+                        "  <!-- The audio you're transcribing OVERLAPS with this content -->\n"
+                        f"  <participants>{prev_participants}</participants>\n"
+                        "  <recent_dialogue>\n"
+                        + "\n".join(prev_context_lines)
+                        + "\n  </recent_dialogue>\n"
+                        "</pre_transcription_conversation>\n\n"
+                    )
+                    chunk_input = pre_context + chunk_input
+                    log_info(
+                        f"Injected context from chunk {chunk_index} "
+                        f"({len(prev_context_lines)} lines, participants: {prev_participants})"
+                    )
+
+                # Process with Agent
+                response = await agent.arun(chunk_input, audio=[Audio(filepath=chunk_path)])
+
+                if response and response.content:
+                    result_model = cast(TranscriptionResult, response.content)
+
+                    # Save individual chunk result if requested
+                    if save_chunks:
+                        chunk_output_path = os.path.join(
+                            output_dir, f"{base_name_ref}_chunk_{chunk_index + 1:03d}.json"
+                        )
+                        with open(chunk_output_path, "w") as f:
+                            f.write(result_model.model_dump_json(indent=2))
+                        log_info(f"Saved chunk {chunk_index + 1} result to {chunk_output_path}")
+
+                    log_info(
+                        f"Chunk {chunk_index + 1} processed successfully: "
+                        f"{len(result_model.conversation)} dialogue lines"
+                    )
+                    return (result_model, start_time, end_time)
+                else:
+                    log_warning(
+                        f"Agent failed to process chunk {chunk_index + 1} for {file_path_ref}"
+                    )
+                    return None
+
+            except Exception as e:
+                log_error(f"Error processing chunk {chunk_index + 1} for {file_path_ref}: {e}")
+                return None
+            finally:
+                # Clean up temporary chunk file
+                if chunk_path and os.path.exists(chunk_path):
+                    try:
+                        os.remove(chunk_path)
+                    except Exception:
+                        pass
+
+        # Process all chunks sequentially to enable context passing between chunks
+        log_info(
+            f"Starting sequential processing of {len(chunks)} chunks "
+            f"(sequential for context passing and Whisper concurrency)"
+        )
+        chunk_results: list[tuple[TranscriptionResult, float, float]] = []
+        previous_result: TranscriptionResult | None = None
+
+        for i, chunk_data in enumerate(chunks):
+            result = await process_chunk(
+                chunk_data, i, chunks, base_name, file_path, original_date, previous_result
+            )
+            if result is not None:
+                chunk_results.append(result)
+                # Store this result for context in next chunk
+                previous_result = result[0]
+            else:
+                log_warning(f"Chunk {i + 1} failed to process, will skip")
+
+        if not chunk_results:
+            log_error(f"All chunks failed to process for {file_path}")
+            return
+
+        log_info(
+            f"Completed sequential processing: {len(chunk_results)}/{len(chunks)} chunks successful"
+        )
+
+        # Agentic pairwise reduction of overlapping chunks
+        if len(chunk_results) > 1:
+            log_info(
+                f"Agentic pairwise reduction of {len(chunk_results)} overlapping chunks "
+                f"(overlap={overlap:.0f}s)"
+            )
+            # Sort chunks by start time to maintain order
+            chunk_results.sort(key=lambda chunk: chunk[1])
+
+            first_result, first_start, _ = chunk_results[0]
+            merged_result = first_result.with_timestamp_offset(first_start)
+
+            merge_agent_instance = dataclass_copy(MERGE_AGENT, **agent_kwargs)
+
+            for i in range(1, len(chunk_results)):
+                chunk_result, chunk_start, _ = chunk_results[i]
+                chunk_with_absolute_timestamps = chunk_result.with_timestamp_offset(chunk_start)
+                merged_result = await merge_transcription_results_with_agent(
+                    accumulated=merged_result,
+                    new_chunk=chunk_with_absolute_timestamps,
+                    chunk_index=i,
+                    agent=merge_agent_instance,
+                    overlap_duration=overlap,
+                )
+
+            log_info("Agentic reduction complete - now deterministic cleanup can be applied")
+        else:
+            first_result, first_start, _ = chunk_results[0]
+            merged_result = first_result.with_timestamp_offset(first_start)
+
+        return merged_result
+
+    except Exception as e:
+        log_error(f"Error processing {file_path} with parallel chunked processing: {e}")
+        return None
 
 
 def extract_audio_creation_date(file_path: str) -> str | None:
@@ -225,6 +526,114 @@ class TranscriptionResult(BaseModel):
     date: str | None = Field(
         None, description="The date of the conversation if it can be inferred. [DD-MM-YYYY]"
     )
+
+    def to_text(self) -> str:
+        """Convert TranscriptionResult to an XML text format.
+
+        This format is human-readable and can be parsed back using from_text().
+        Uses XML tags consistent with the rest of the codebase (graph queries, entities, etc.).
+
+        Returns:
+            Formatted XML string representation of the transcription
+        """
+        from xml.sax.saxutils import escape, quoteattr
+
+        lines: list[str] = []
+        lines.append("<!--")
+        lines.append("  Conversation Transcription")
+        lines.append("  This file contains a diarized conversation with speaker labels,")
+        lines.append("  timestamps, and participant information. Can be parsed back")
+        lines.append("  into a TranscriptionResult object using TranscriptionResult.from_text().")
+        lines.append("-->")
+        lines.append("")
+        lines.append("<transcription>")
+
+        # Metadata section
+        lines.append("  <metadata>")
+        if self.date:
+            lines.append(f'    <date>{escape(self.date)}</date>')
+
+        # Participants
+        lines.append("    <participants>")
+        for p in self.participants:
+            lines.append(f'      <participant name={quoteattr(p.name)} role={quoteattr(p.role)} />')
+        lines.append("    </participants>")
+        lines.append("  </metadata>")
+
+        # Conversation section
+        lines.append("  <conversation>")
+        for line in self.conversation:
+            escaped_text = escape(line.text)
+            lines.append(
+                f'    <dialog_line speaker={quoteattr(line.speaker)} '
+                f'start="{line.timerange.start:.3f}" '
+                f'end="{line.timerange.end:.3f}">{escaped_text}</dialog_line>'
+            )
+        lines.append("  </conversation>")
+
+        lines.append("</transcription>")
+        return "\n".join(lines)
+
+    @classmethod
+    def from_text(cls, text: str) -> "TranscriptionResult":
+        """Parse an XML text format back into TranscriptionResult.
+
+        Args:
+            text: The text output from to_text() (XML format)
+
+        Returns:
+            TranscriptionResult object
+
+        Raises:
+            ValueError: If the text format is invalid
+        """
+        import re
+        from html import unescape
+
+        # Parse date
+        date_match = re.search(r'<date>([^<]+)</date>', text)
+        date: str | None = date_match.group(1) if date_match else None
+
+        # Parse participants
+        participants: list[Participant] = []
+        participant_pattern = re.compile(
+            r'<participant name="([^"]+)"\s+role="([^"]+)"\s+/>'
+        )
+        for match in participant_pattern.finditer(text):
+            name = unescape(match.group(1))
+            role = unescape(match.group(2))
+            participants.append(Participant(name=name, role=role))
+
+        # Parse conversation lines
+        conversation: list[DialogueLine] = []
+        dialog_pattern = re.compile(
+            r'<dialog_line\s+speaker="([^"]+)"\s+start="([0-9.]+)"\s+end="([0-9.]+)">\s*(.+?)\s*</dialog_line>',
+            re.DOTALL,
+        )
+
+        for match in dialog_pattern.finditer(text):
+            speaker = unescape(match.group(1))
+            start = float(match.group(2))
+            end = float(match.group(3))
+            content = match.group(4).strip()
+            text_content = unescape(content)
+
+            conversation.append(
+                DialogueLine(
+                    speaker=speaker,
+                    text=text_content,
+                    timerange=Timerange(start=start, end=end),
+                )
+            )
+
+        if not participants and not conversation:
+            raise ValueError("Invalid format: could not parse transcription data")
+
+        return cls(
+            participants=participants,
+            conversation=conversation,
+            date=date,
+        )
 
     def with_timestamp_offset(self, offset_seconds: float) -> "TranscriptionResult":
         """Return a new TranscriptionResult with all timestamps offset by the given amount.
@@ -420,252 +829,20 @@ async def _process_with_chunking(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Initialize pre_hooks list
-    hooks_list: list[Any] = []
-
-    # Add pre_hooks from parameter if provided
-    if agent_kwargs.get("pre_hooks"):
-        pre_hooks = agent_kwargs.pop("pre_hooks")
-        hooks_list.extend(pre_hooks)
-
-    # Add raw transcription hook if requested
-    if save_raw_transcription:
-        config = TranscriptionHooksConfig(
-            save_transcriptions=True,
-            transcriber=audio_transcriber,
-            transcription_dir=save_dir or output_dir,
-        )
-        hooks_list.append(config.pre_hook())
-
-    # Add hooks to agent_kwargs if any
-    if hooks_list:
-        agent_kwargs["pre_hooks"] = hooks_list
-
-    agent = dataclass_copy(TRANSCRIBER_AGENT, **agent_kwargs)
-
-    default_input = "Transcribe given audio."
-    final_input = default_input
-
-    if input:
-        final_input += (
-            "These special instructions should be given HIGHEST priority. "
-            "THESE INSTRUCTIONS OVERRIDE ALL PREVIOUS INSTRUCTIONS IN CASE OF CONFLICT "
-            f"<special_instructions>{input}</special_instructions>"
-        )
-
     # Process all files
     for file_path in files:
         log_info(f"Processing {file_path} with parallel chunked agent processing...")
-
-        try:
-            # Read the audio file
-            with open(file_path, "rb") as f:
-                audio_bytes = f.read()
-
-            # Extract original file metadata
-            original_date = extract_audio_creation_date(file_path)
-
-            # Split audio into overlapping chunks
-            chunks = split_audio_into_chunks(
-                audio_bytes, chunk_duration=chunk_duration, overlap=overlap
-            )
-            base_name = Path(file_path).stem
-
-            log_info(
-                f"Split {file_path} into {len(chunks)} chunks "
-                f"(duration={chunk_duration / 60:.1f}min, overlap={overlap:.0f}s)"
-            )
-
-            async def process_chunk(
-                chunk_data: tuple[bytes, float, float],
-                chunk_index: int,
-                chunks_ref: list[tuple[bytes, float, float]],
-                base_name_ref: str,
-                file_path_ref: str,
-                orig_date: str | None,
-                previous_result: TranscriptionResult | None,
-            ) -> tuple[TranscriptionResult, float, float] | None:
-                """Process a single chunk with the agent.
-
-                Args:
-                    chunk_data: Tuple of (audio_bytes, start_time, end_time)
-                    chunk_index: Index of this chunk (0-based)
-                    chunks_ref: Reference to all chunks list
-                    base_name_ref: Base filename
-                    file_path_ref: Full file path
-                    orig_date: Original file date from metadata
-                    previous_result: Transcription result from previous chunk (for context)
-                """
-                chunk_bytes, start_time, end_time = chunk_data
-
-                chunk_duration_actual = end_time - start_time
-                log_info(
-                    f"Processing chunk {chunk_index + 1}/{len(chunks_ref)}: "
-                    f"{start_time / 60:.1f}min - {end_time / 60:.1f}min ({chunk_duration_actual / 60:.1f}min)"
-                )
-
-                chunk_path = None
-                try:
-                    # Create temporary audio chunk
-                    chunk_filename = f"{base_name_ref}_chunk_{chunk_index + 1:03d}.wav"
-                    chunk_path = os.path.join(output_dir, chunk_filename)
-
-                    # Save chunk to temporary file
-                    with open(chunk_path, "wb") as chunk_file:
-                        chunk_file.write(chunk_bytes)
-
-                    # Build input with context
-                    chunk_input = final_input
-
-                    # Add original date as context (instead of patching afterward)
-                    if orig_date:
-                        chunk_input = (
-                            f"<recording_metadata>\n"
-                            f"  <date>{orig_date}</date>\n"
-                            f"</recording_metadata>\n\n{chunk_input}"
-                        )
-
-                    # Add previous chunk's transcription as context for speaker identification
-                    if previous_result and chunk_index > 0:
-                        # Format the previous transcription for context
-                        # Include the last portion that corresponds to the overlap
-                        prev_context_lines: list[str] = []
-                        for line in previous_result.conversation[-10:]:  # Last 10 lines for context
-                            prev_context_lines.append(
-                                f'  <line speaker="{line.speaker}" '
-                                f'start="{line.timerange.start:.1f}" '
-                                f'end="{line.timerange.end:.1f}">{line.text}</line>'
-                            )
-
-                        prev_participants = ", ".join(
-                            f"{p.name} ({p.role})" for p in previous_result.participants
-                        )
-
-                        pre_context = (
-                            "<pre_transcription_conversation>\n"
-                            "  <!-- This is the END of the PREVIOUS chunk's transcription -->\n"
-                            "  <!-- Use this ONLY for speaker identification - DO NOT include in output! -->\n"
-                            "  <!-- The audio you're transcribing OVERLAPS with this content -->\n"
-                            f"  <participants>{prev_participants}</participants>\n"
-                            "  <recent_dialogue>\n"
-                            + "\n".join(prev_context_lines)
-                            + "\n  </recent_dialogue>\n"
-                            "</pre_transcription_conversation>\n\n"
-                        )
-                        chunk_input = pre_context + chunk_input
-                        log_info(
-                            f"Injected context from chunk {chunk_index} "
-                            f"({len(prev_context_lines)} lines, participants: {prev_participants})"
-                        )
-
-                    # Process with Agent
-                    response = await agent.arun(chunk_input, audio=[Audio(filepath=chunk_path)])
-
-                    if response and response.content:
-                        result_model = cast(TranscriptionResult, response.content)
-
-                        # Always save individual chunk result
-                        chunk_output_path = os.path.join(
-                            output_dir, f"{base_name_ref}_chunk_{chunk_index + 1:03d}.json"
-                        )
-                        with open(chunk_output_path, "w") as f:
-                            f.write(result_model.model_dump_json(indent=2))
-                        log_info(f"Saved chunk {chunk_index + 1} result to {chunk_output_path}")
-
-                        log_info(
-                            f"Chunk {chunk_index + 1} processed successfully: "
-                            f"{len(result_model.conversation)} dialogue lines"
-                        )
-                        return (result_model, start_time, end_time)
-                    else:
-                        log_warning(
-                            f"Agent failed to process chunk {chunk_index + 1} for {file_path_ref}"
-                        )
-                        return None
-
-                except Exception as e:
-                    log_error(f"Error processing chunk {chunk_index + 1} for {file_path_ref}: {e}")
-                    return None
-                finally:
-                    # Clean up temporary chunk file
-                    if chunk_path and os.path.exists(chunk_path):
-                        try:
-                            os.remove(chunk_path)
-                        except Exception:
-                            pass
-
-            # Process all chunks sequentially to enable context passing between chunks
-            log_info(
-                f"Starting sequential processing of {len(chunks)} chunks "
-                f"(sequential for context passing and Whisper concurrency)"
-            )
-            chunk_results: list[tuple[TranscriptionResult, float, float]] = []
-            previous_result: TranscriptionResult | None = None
-
-            for i, chunk_data in enumerate(chunks):
-                chunk_duration_actual = chunk_data[2] - chunk_data[1]
-                log_info(
-                    f"Processing chunk {i + 1}/{len(chunks)}: "
-                    f"{chunk_data[1] / 60:.1f}min - {chunk_data[2] / 60:.1f}min "
-                    f"({chunk_duration_actual / 60:.1f}min)"
-                )
-
-                result = await process_chunk(
-                    chunk_data, i, chunks, base_name, file_path, original_date, previous_result
-                )
-                if result is not None:
-                    chunk_results.append(result)
-                    # Store this result for context in next chunk
-                    previous_result = result[0]
-                else:
-                    log_warning(f"Chunk {i + 1} failed to process, will skip")
-
-            if not chunk_results:
-                log_error(f"All chunks failed to process for {file_path}")
-                continue
-
-            log_info(
-                f"Completed sequential processing: {len(chunk_results)}/{len(chunks)} chunks successful"
-            )
-
-            # Agentic pairwise reduction of overlapping chunks
-            if len(chunk_results) > 1:
-                log_info(
-                    f"Agentic pairwise reduction of {len(chunk_results)} overlapping chunks "
-                    f"(overlap={overlap:.0f}s)"
-                )
-                # Sort chunks by start time to maintain order
-                chunk_results.sort(key=lambda chunk: chunk[1])
-
-                first_result, first_start, _ = chunk_results[0]
-                merged_result = first_result.with_timestamp_offset(first_start)
-
-                merge_agent_instance = dataclass_copy(MERGE_AGENT, **agent_kwargs)
-
-                for i in range(1, len(chunk_results)):
-                    chunk_result, chunk_start, _ = chunk_results[i]
-                    chunk_with_absolute_timestamps = chunk_result.with_timestamp_offset(chunk_start)
-                    merged_result = await merge_transcription_results_with_agent(
-                        accumulated=merged_result,
-                        new_chunk=chunk_with_absolute_timestamps,
-                        chunk_index=i,
-                        agent=merge_agent_instance,
-                        overlap_duration=overlap,
-                    )
-
-                log_info("Agentic reduction complete - now deterministic cleanup can be applied")
-            else:
-                first_result, first_start, _ = chunk_results[0]
-                merged_result = first_result.with_timestamp_offset(first_start)
-
-            # Save final merged result
-            output_path = os.path.join(output_dir, f"{base_name}.json")
-            with open(output_path, "w") as f:
-                f.write(merged_result.model_dump_json(indent=2))
-            log_info(f"Saved final transcript to {output_path}")
-
-        except Exception as e:
-            log_error(f"Error processing {file_path} with parallel chunked processing: {e}")
+        await process_audio_file(
+            file_path=file_path,
+            chunk_duration=chunk_duration,
+            overlap=overlap,
+            output_dir=output_dir,
+            input=input,
+            audio_transcriber=audio_transcriber,
+            save_raw_transcription=save_raw_transcription,
+            save_dir=save_dir,
+            **agent_kwargs,
+        )
 
 
 TRANSCRIBER_AGENT = Agent(

@@ -16,7 +16,6 @@ purpose and usage pattern of this example file.
 
 import asyncio
 import os
-import tempfile
 
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
@@ -28,7 +27,6 @@ from blockether_foundation.agents.hooks import (
     JudgeCriteria,
     ModelConfig,
 )
-from blockether_foundation.agents.models.zai import Zhipu
 from blockether_foundation.agents.storage.in_memory import InMemoryDb
 
 console = Console()
@@ -43,8 +41,8 @@ async def main() -> None:
     if not MODEL_BASE_URL:
         raise ValueError("BLOCKETHER_LLM_API_BASE_URL environment variable is not set.")
 
-    gpt_4o = OpenAIChat(
-        id="gpt-4o",
+    gpt_5_mini = OpenAIChat(
+        id="gpt-5-mini",
         base_url=MODEL_BASE_URL,
         api_key=MODEL_API_KEY,
         modalities=["text"],
@@ -59,13 +57,13 @@ async def main() -> None:
     consensus_config = ConsensusHooksConfig(
         models=[
             ModelConfig(
-                model=gpt_4o,
+                model=gpt_5_mini,
                 name="Analyst",
                 importance=0.5,
                 perspective="Focus on thorough analysis and edge cases.",
             ),
             ModelConfig(
-                model=gpt_4o,
+                model=gpt_5_mini,
                 name="Pragmatist",
                 importance=0.5,
                 perspective="Focus on practical, actionable solutions.",
@@ -76,21 +74,34 @@ async def main() -> None:
                 name="Completeness",
                 description="Does response cover all aspects?",
                 weight=1.0,
-                threshold=0.6,
+                threshold=0.8,
+            ),
+            JudgeCriteria(
+                name="Accuracy",
+                description="Is the response factually correct?",
+                weight=1.0,
+                threshold=0.8,
+            ),
+            JudgeCriteria(
+                name="Meaningfulness",
+                description="Is the response meaningful and relevant?",
+                weight=1.0,
+                threshold=0.8,
             ),
         ],
         hitl=True,
         hitl_max_questions=3,
         skip_triage=True,
+        auto_save_html=True,
+        output_directory="hitl_consensus_outputs",
         max_refinement_iterations=2,
     )
 
     agent = Agent(
-        model=gpt_4o,
+        model=gpt_5_mini,
         name="HITLConsensusAgent",
         description="An agent that gathers user feedback during consensus.",
         pre_hooks=[consensus_config.pre_hook()],
-        markdown=True,
         debug_mode=True,
         db=InMemoryDb(),
     )
@@ -103,12 +114,17 @@ async def main() -> None:
     console.print()
 
     user_query = Prompt.ask("[bold green]Enter your question[/]")
-
+    # user_query = """
+    # """
     console.print("\n[dim]Running consensus with HITL...[/]\n")
     response = await agent.arun(user_query)
+    session_id = response.session_id
 
     while response.is_paused:
         console.print("\n[bold yellow]Agent needs your input:[/]\n")
+
+        # Collect user input and store in session_state for HITL toolkit access
+        user_answers: dict[str, str] = {}
 
         for requirement in response.active_requirements:
             if requirement.needs_user_input and requirement.user_input_schema:
@@ -116,11 +132,13 @@ async def main() -> None:
                     console.print(f"[bold]{field.description}[/]\n")
                     answer = Prompt.ask(f"Your answer for '{field.name}'")
                     field.value = answer
+                    user_answers[field.name] = answer
 
         console.print("\n[dim]Continuing with your feedback...[/]\n")
         response = await agent.acontinue_run(
             run_id=response.run_id,
-            requirements=response.requirements,
+            session_id=session_id,
+            run_response=response,
         )
 
     console.print("\n[bold green]Final Response:[/]\n")

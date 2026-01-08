@@ -1,0 +1,560 @@
+"""Pydantic models for consensus hooks."""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from agno.models.base import Model
+from pydantic import Field, field_validator
+
+from ....models import BaseModelSerializable, ChainOfThoughts
+
+# Type aliases for consensus workflow
+CritiqueTask = tuple["ModelConfig", "ModelConfig", "GenerationOutput", bool]
+
+# Constants for HITL session storage
+HITL_QUESTIONNAIRE_KEY = "consensus_hitl_questionnaire"
+
+
+class KeyInsight(ChainOfThoughts):
+    insight: str = Field(description="The insight itself.")
+    evidence: str | None = Field(
+        default=None, description="Supporting evidence or examples for this insight."
+    )
+
+
+class MissingConsideration(ChainOfThoughts):
+    consideration: str = Field(description="The consideration that was missed.")
+    suggested_action: str | None = Field(
+        default=None, description="What should be done to address this missing consideration."
+    )
+
+
+class FlawedAssumption(ChainOfThoughts):
+    assumption: str = Field(description="The flawed assumption that was made.")
+    correct_understanding: str | None = Field(
+        default=None, description="What the correct assumption or understanding should be."
+    )
+
+
+class AgreementPoint(ChainOfThoughts):
+    point: str = Field(description="The point of agreement.")
+    supporting_models: list[str] = Field(
+        default=[], description="Names of models that support this agreement."
+    )
+
+
+class UncertaintyArea(ChainOfThoughts):
+    area: str = Field(description="The area where uncertainty remains.")
+    potential_resolution: str | None = Field(
+        default=None, description="How this uncertainty might be resolved."
+    )
+
+
+class HITLQuestionOption(BaseModelSerializable):
+    """An option for a multi-choice question."""
+
+    option_id: str = Field(description="Unique ID like 'a', 'b', 'c'.")
+    label: str = Field(description="Short label for this option.")
+    description: str | None = Field(
+        default=None, description="Detailed explanation of what this option means."
+    )
+
+
+class HITLQuestion(ChainOfThoughts):
+    """A multi-choice question for user feedback based on consensus uncertainties.
+
+    Questions should be generated based on areas_of_uncertainty from the synthesis.
+    Only generate questions when there are genuine uncertainties that user input can resolve.
+    """
+
+    question_id: str = Field(description="Unique identifier for this question.")
+    question_text: str = Field(description="The question to ask the user.")
+    options: list[HITLQuestionOption] = Field(description="Available answer choices.")
+    category: str = Field(
+        description="Question type: 'uncertainty', 'preference', 'priority', or 'clarification'."
+    )
+    allows_multiple: bool = Field(
+        default=False, description="Whether multiple options can be selected."
+    )
+    allows_free_text: bool = Field(
+        default=False,
+        description="Whether user can provide free text answer instead of selecting options.",
+    )
+    related_uncertainty: str | None = Field(
+        default=None, description="Links to an UncertaintyArea if applicable."
+    )
+
+
+class HITLUserAnswer(BaseModelSerializable):
+    """User's answer to an HITL question."""
+
+    question_id: str = Field(description="ID of the question being answered.")
+    question_text: str = Field(description="The question that was asked.")
+    selected_options: list[str] = Field(default=[], description="IDs of selected options.")
+    selected_labels: list[str] = Field(
+        default=[], description="Labels of selected options for display."
+    )
+    free_text_response: str | None = Field(
+        default=None, description="Free text response if provided."
+    )
+
+
+class HITLIteration(BaseModelSerializable):
+    """A single HITL iteration capturing questionnaire, answers, and resulting synthesis."""
+
+    iteration: int = Field(description="1-indexed iteration number.")
+    questionnaire: "HITLQuestionnaire" = Field(
+        description="The questionnaire presented to the user."
+    )
+    user_answers: list[HITLUserAnswer] = Field(
+        default=[], description="User's answers to the questions."
+    )
+    synthesis_before_confidence: float = Field(
+        ge=0.0, le=1.0, description="Synthesis confidence before this iteration."
+    )
+    synthesis_after_confidence: float = Field(
+        ge=0.0, le=1.0, description="Synthesis confidence after incorporating feedback."
+    )
+    synthesis_output_after: str = Field(
+        description="The synthesized output after incorporating user feedback."
+    )
+    free_text_response: str | None = Field(
+        default=None, description="Free text response if provided."
+    )
+
+
+class HITLQuestionnaire(ChainOfThoughts):
+    """Questionnaire generated by model from synthesis uncertainties.
+
+    IMPORTANT: Only generate questions when there are genuine uncertainties.
+    If the synthesis has high confidence and no significant uncertainties,
+    the questions list should be EMPTY - do not fabricate questions.
+
+    Questions should be derived from:
+    - areas_of_uncertainty in the synthesis
+    - conflict_resolutions where user preference would help
+    - low confidence areas that need clarification
+    """
+
+    questions: list[HITLQuestion] = Field(
+        default=[],
+        description="Multi-choice questions for the user. EMPTY if no uncertainties exist.",
+    )
+    context_summary: str = Field(description="Brief summary of consensus state for user context.")
+    synthesis_confidence: float = Field(
+        ge=0.0, le=1.0, description="Confidence level of the synthesis."
+    )
+    should_skip_hitl: bool = Field(
+        default=False,
+        description="True if HITL should be skipped because there are no meaningful questions to ask.",
+    )
+
+
+class SpecificIssue(ChainOfThoughts):
+    issue: str = Field(description="Description of the issue.")
+    location: str | None = Field(default=None, description="Where in the output this issue occurs.")
+
+
+class ImprovementSuggestion(ChainOfThoughts):
+    suggestion: str = Field(description="The improvement suggestion.")
+    implementation_hint: str | None = Field(
+        default=None, description="Hint on how to implement this improvement."
+    )
+
+
+class Contribution(ChainOfThoughts):
+    contribution: str = Field(description="Description of the contribution.")
+    uniqueness: str | None = Field(
+        default=None, description="What makes this contribution unique or valuable."
+    )
+
+
+class ConsideredAlternative(BaseModelSerializable):
+    approach: str = Field(description="Description of the alternative approach.")
+    why_not_chosen: str | None = Field(
+        default=None,
+        description="Reason this approach was not selected. None if this IS the chosen approach.",
+    )
+    potential_value: float = Field(
+        ge=0.0, le=1.0, description="How valuable this alternative might be (0.0-1.0)."
+    )
+
+
+class ConfidenceBreakdown(ChainOfThoughts):
+    factual_accuracy: float = Field(
+        ge=0.0, le=1.0, description="Confidence in factual correctness."
+    )
+    completeness: float = Field(
+        ge=0.0, le=1.0, description="Confidence that all aspects are covered."
+    )
+    logical_coherence: float = Field(
+        ge=0.0, le=1.0, description="Confidence in logical consistency."
+    )
+    relevance_to_task: float = Field(
+        ge=0.0, le=1.0, description="Confidence output addresses the task."
+    )
+
+
+class GenerationOutput(ChainOfThoughts):
+    output: str = Field(description="The model's main output/answer to the task.")
+    assumptions: list[str] = Field(default=[], description="Assumptions made while generating.")
+    considered_alternatives: list[ConsideredAlternative] = Field(
+        default=[], description="Alternative approaches considered."
+    )
+    confidence_breakdown: ConfidenceBreakdown = Field(...)
+    key_insights: list[KeyInsight] = Field(
+        default=[], description="Main insights this model brings with reasoning and impact."
+    )
+
+
+class TriageDecision(ChainOfThoughts):
+    requires_consensus: bool = Field(
+        description="True if the request requires multi-model consensus research, False otherwise."
+    )
+    reason: str = Field(description="Brief explanation for the decision.")
+    category: str = Field(
+        description="Category of request: 'research', 'implementation', 'clarification', "
+        "'confirmation', 'greeting', 'simple_question', or 'other'."
+    )
+
+
+class StrengthWeakness(BaseModelSerializable):
+    description: str = Field(description="Description of the strength or weakness.")
+    importance: float = Field(ge=0.0, le=1.0, description="Importance or value score (0.0-1.0).")
+    evidence: str = Field(description="Quote or reference from the output.")
+
+
+class CheckedClaim(BaseModelSerializable):
+    claim_text: str = Field(description="The factual claim being checked.")
+    is_accurate: bool = Field(description="True if claim is factually accurate.")
+    correction: str | None = Field(
+        default=None, description="If inaccurate, the correct information."
+    )
+    confidence: float = Field(ge=0.0, le=1.0, description="Confidence in verification (0.0-1.0).")
+
+
+class SuggestedImprovement(BaseModelSerializable):
+    what_to_change: str = Field(description="What should be changed.")
+    why: str = Field(description="Why this change is needed.")
+    proposed_fix: str = Field(description="The proposed fix or improvement.")
+    expected_impact: float = Field(ge=0.0, le=1.0, description="Expected impact (0.0-1.0).")
+
+
+class CritiqueBase(BaseModelSerializable):
+    """Base class for critique-related models with shared evaluation fields."""
+
+    strengths: list[StrengthWeakness] = Field(default=[], description="Identified strengths.")
+    weaknesses: list[StrengthWeakness] = Field(default=[], description="Identified weaknesses.")
+    missing_considerations: list[MissingConsideration] = Field(
+        default=[], description="Important aspects missed with reasoning and impact."
+    )
+    flawed_assumptions: list[FlawedAssumption] = Field(
+        default=[], description="Incorrect assumptions with reasoning and impact."
+    )
+    suggested_improvements: list[SuggestedImprovement] = Field(
+        default=[], description="Suggested improvements."
+    )
+    checked_claims: list[CheckedClaim] = Field(
+        default=[],
+        description="Factual claims checked for accuracy (includes both accurate and inaccurate claims).",
+    )
+    accurate_claims: list[CheckedClaim] = Field(
+        default=[], description="Factual claims that passed verification."
+    )
+    inaccurate_claims: list[CheckedClaim] = Field(
+        default=[], description="Factual claims that failed verification with corrections."
+    )
+    factual_accuracy_score: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Percentage of factual claims that are accurate."
+    )
+    agreement_level: float = Field(ge=0.0, le=1.0, description="Agreement with reviewed output.")
+    overall_quality_score: float = Field(
+        ge=0.0, le=1.0, description="Quality score of reviewed output."
+    )
+
+
+class CritiqueFeedback(CritiqueBase, ChainOfThoughts):
+    is_self_critique: bool = Field(description="True if critiquing own output.")
+    target_model: str = Field(description="Name of the model being critiqued.")
+    alternative_approaches: list[ConsideredAlternative] = Field(
+        default=[], description="Better approaches."
+    )
+
+
+class ConflictResolution(BaseModelSerializable):
+    topic: str = Field(description="What the disagreement was about.")
+    conflicting_positions: dict[str, str] = Field(
+        description="Each model's position (name -> position)."
+    )
+    resolution: str = Field(description="How the conflict was resolved.")
+    resolution_rationale: str = Field(description="Why this resolution was chosen.")
+    winning_model: str | None = Field(default=None, description="Model whose position was adopted.")
+
+
+class IncorporatedInsight(BaseModelSerializable):
+    from_model: str = Field(description="Model that provided this insight.")
+    insight: str = Field(description="The insight that was incorporated.")
+    weight_applied: float = Field(ge=0.0, le=1.0, description="Weight based on model importance.")
+    how_used: str = Field(description="How this insight was used.")
+
+
+class RejectedApproach(BaseModelSerializable):
+    from_model: str = Field(description="Model that proposed this approach.")
+    approach: str = Field(description="The rejected approach.")
+    rejection_reason: str = Field(description="Why it was rejected.")
+    critique_references: list[str] = Field(
+        default=[], description="Critiques that led to rejection."
+    )
+
+
+class ConsensusSynthesis(ChainOfThoughts):
+    synthesized_output: str = Field(description="The synthesized final output.")
+    synthesis_approach: str = Field(description="How the outputs were combined.")
+    incorporated_insights: list[IncorporatedInsight] = Field(
+        default=[], description="Incorporated insights."
+    )
+    conflict_resolutions: list[ConflictResolution] = Field(
+        default=[], description="Resolved conflicts."
+    )
+    rejected_approaches: list[RejectedApproach] = Field(
+        default=[], description="Rejected approaches."
+    )
+    model_contribution_weights: dict[str, float] = Field(
+        default={}, description="Final weights per model."
+    )
+    consensus_confidence: float = Field(ge=0.0, le=1.0, description="Confidence in consensus.")
+    areas_of_strong_agreement: list[AgreementPoint] = Field(
+        default=[], description="Areas of strong agreement with reasoning and confidence."
+    )
+    areas_of_uncertainty: list[UncertaintyArea] = Field(
+        default=[], description="Areas that remain uncertain with reasoning and impact."
+    )
+
+
+class ConsensusSynthesisWithHITL(ConsensusSynthesis):
+    """Synthesis with optional HITL questionnaire - generated in single model call."""
+
+    hitl_questionnaire: HITLQuestionnaire | None = Field(
+        default=None,
+        description="Questionnaire for user feedback. None or empty questions if no uncertainties.",
+    )
+
+
+class JudgeCriteria(BaseModelSerializable):
+    name: str = Field(description="Name of the criterion.")
+    description: str = Field(description="What this criterion evaluates.")
+    weight: float = Field(default=1.0, ge=0.0, description="Relative weight.")
+    threshold: float = Field(default=0.7, ge=0.0, le=1.0, description="Minimum score to pass.")
+
+
+class JudgeVerdict(BaseModelSerializable):
+    criterion_name: str = Field(description="Name of the criterion evaluated.")
+    score: float = Field(ge=0.0, le=1.0, description="Score for this criterion.")
+    passed: bool = Field(description="Whether this criterion passed.")
+    reasoning: str = Field(description="Reasoning behind the verdict.")
+    specific_issues: list[SpecificIssue] = Field(
+        default=[], description="Specific issues identified with reasoning and importance."
+    )
+    improvement_suggestions: list[ImprovementSuggestion] = Field(
+        default=[], description="Improvement suggestions with reasoning and expected impact."
+    )
+
+
+class IssueAddressed(ChainOfThoughts):
+    criterion_name: str = Field(description="Name of the criterion that was failed.")
+    original_issue: str = Field(
+        description="Description of the original issue from the judge verdict."
+    )
+    how_fixed: str = Field(
+        description="Explanation of how the issue was addressed in the refined output."
+    )
+    changes_made: str = Field(description="Specific changes made to address this issue.")
+
+
+class IssueNotAddressed(ChainOfThoughts):
+    criterion_name: str = Field(description="Name of the criterion that was failed.")
+    original_issue: str = Field(
+        description="Description of the original issue from the judge verdict."
+    )
+    why_not_addressed: str = Field(
+        description="Explanation of why this issue could not be addressed "
+        "(e.g., insufficient information, inherent limitation, trade-off with other criteria)."
+    )
+    suggested_alternative: str | None = Field(
+        default=None,
+        description="Alternative approach that might address this issue, if any.",
+    )
+
+
+class RefinementResult(ChainOfThoughts):
+    refined_output: str = Field(description="The refined output text.")
+    issues_addressed: list[IssueAddressed] = Field(
+        default=[],
+        description="Issues that were successfully addressed with details on how.",
+    )
+    issues_not_addressed: list[IssueNotAddressed] = Field(
+        default=[],
+        description="Issues that could not be addressed with explanations.",
+    )
+    additional_improvements: list[str] = Field(
+        default=[],
+        description="Any other improvements made beyond the failed criteria.",
+    )
+
+
+class RefinementAction(BaseModelSerializable):
+    criterion_name: str = Field(description="Name of the criterion.")
+    issue_description: str = Field(description="Description of the issue from judge verdict.")
+    was_addressed: bool = Field(description="Whether this issue was addressed.")
+    importance: float = Field(ge=0.0, le=1.0, description="Importance of the issue (from verdict).")
+    reasoning: str | None = Field(
+        default=None,
+        description="Explanation of how it was fixed (if addressed) or why not (if not addressed).",
+    )
+    changes_made: str | None = Field(
+        default=None,
+        description="Specific changes made to address the issue (if addressed).",
+    )
+
+
+class JudgeResult(ChainOfThoughts):
+    iteration: int = Field(description="Refinement iteration number.")
+    verdicts: list[JudgeVerdict] = Field(description="Verdicts for each criterion.")
+    overall_score: float = Field(ge=0.0, le=1.0, description="Weighted average score.")
+    passed: bool = Field(description="Whether overall evaluation passed.")
+    refinement_actions: list[RefinementAction] = Field(
+        default=[], description="Refinement actions taken."
+    )
+    refined_output: str | None = Field(default=None, description="Refined output if performed.")
+
+
+class ModelContribution(BaseModelSerializable):
+    model_name: str = Field(description="Name of the model.")
+    importance: float = Field(ge=0.0, le=1.0, description="Model's importance weight.")
+    perspective: str = Field(description="Model's unique perspective.")
+    key_contributions: list[Contribution] = Field(
+        default=[], description="Key contributions with reasoning and impact."
+    )
+    insights_incorporated: int = Field(default=0, description="Insights incorporated count.")
+    insights_rejected: int = Field(default=0, description="Insights rejected count.")
+
+
+class GenerationOutputSummary(BaseModelSerializable):
+    model_name: str = Field(description="Name of the model that generated this output.")
+    importance: float = Field(ge=0.0, le=1.0, description="Model's importance weight.")
+    perspective: str = Field(default="", description="Model's unique perspective.")
+    output: str = Field(description="The model's main output/answer.")
+    assumptions: list[str] = Field(default=[], description="Assumptions made.")
+    considered_alternatives: list[ConsideredAlternative] = Field(
+        default=[], description="Alternative approaches considered."
+    )
+    confidence_breakdown: ConfidenceBreakdown | None = Field(
+        default=None, description="Confidence scores by aspect."
+    )
+    key_insights: list[KeyInsight] = Field(
+        default=[], description="Key insights from this model with reasoning and impact."
+    )
+
+
+class CritiqueSummary(CritiqueBase):
+    """Summary of a critique between two models for reporting."""
+
+    reviewer_name: str = Field(description="Name of reviewing model.")
+    target_name: str = Field(description="Name of model being critiqued.")
+    is_self_critique: bool = Field(description="True if critiquing own output.")
+
+
+class ConsensusResult(BaseModelSerializable):
+    user_input: str = Field(description="The original user request/task.")
+    final_output: str = Field(description="The final consensus output.")
+    consensus_confidence: float = Field(ge=0.0, le=1.0, description="Confidence in consensus.")
+    judge_score: float = Field(ge=0.0, le=1.0, description="Final judge score.")
+    refinement_iterations: int = Field(description="Number of refinement iterations.")
+    model_contributions: list[ModelContribution] = Field(description="Model contributions summary.")
+    judge_results: list[JudgeResult] = Field(
+        default=[],
+        description="Detailed judge results per iteration with verdicts and refinements.",
+    )
+    key_agreements: list[AgreementPoint] = Field(
+        default=[], description="Key agreements with reasoning and confidence."
+    )
+    resolved_conflicts: list[ConflictResolution] = Field(
+        default=[], description="Resolved conflicts with full details."
+    )
+    remaining_uncertainties: list[UncertaintyArea] = Field(
+        default=[], description="Remaining uncertainties with reasoning and impact."
+    )
+    generation_summary: str = Field(description="Generation phase summary.")
+    critique_summary: str = Field(description="Critique phase summary.")
+    synthesis_summary: str = Field(description="Synthesis phase summary.")
+    judge_summary: str = Field(description="Judge phase summary.")
+
+    raw_generation_outputs: list[GenerationOutputSummary] = Field(
+        default=[],
+        description="Full generation outputs from each model.",
+    )
+    critique_matrix: list[CritiqueSummary] = Field(
+        default=[],
+        description="Complete critique data between all model pairs.",
+    )
+    incorporated_insights: list[IncorporatedInsight] = Field(
+        default=[],
+        description="All insights incorporated with weights and usage.",
+    )
+    conflict_resolutions: list[ConflictResolution] = Field(
+        default=[],
+        description="Full conflict resolution details with positions.",
+    )
+    rejected_approaches: list[RejectedApproach] = Field(
+        default=[],
+        description="Approaches that were rejected with reasons.",
+    )
+    synthesis_approach: str = Field(
+        default="",
+        description="How the outputs were combined.",
+    )
+    judge_criteria_used: list[JudgeCriteria] = Field(
+        default=[],
+        description="The criteria used for judging.",
+    )
+    hitl_iterations: list[HITLIteration] = Field(
+        default=[],
+        description="HITL iterations with questionnaires, user answers, and resulting syntheses.",
+    )
+
+    def export_report_to_html(
+        self,
+        output_path: str | Path,
+        title: str = "Consensus Decision Report",
+    ) -> Path:
+        from blockether_foundation.agents.hooks.consensus.presentation import (
+            export_consensus_report_to_html,
+        )
+
+        return export_consensus_report_to_html(self, output_path, title)
+
+
+class ModelConfig(BaseModelSerializable):
+    model: Model = Field(description="The Agno model instance.")
+    name: str = Field(description="Name/identifier for this model.")
+    importance: float = Field(default=0.5, ge=0.0, le=1.0, description="Weight factor (0.0-1.0).")
+    perspective: str = Field(default="", description="Unique perspective description.")
+    tools: list[Any] = Field(default=[], description="Tools available during Generation phase.")
+    verification_tools: list[Any] = Field(
+        default=[],
+        description="Tools available during CoVe Verification phase (e.g., search, RAG).",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not v:
+            raise ValueError("name cannot be empty")
+        return v
+
+
+type CritiqueTask = tuple[ModelConfig, ModelConfig, GenerationOutput, bool]

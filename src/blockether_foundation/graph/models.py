@@ -94,6 +94,7 @@ class Entity(TimestampMixin):
     type: EntityType
     id: str | None = None
     content: str | None = None
+    provenance: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -125,6 +126,9 @@ class LLMGraphAddEntity(ChainOfThoughts):
     content: str = Field(
         description="Content or description of the entity. No markdown, plain text only. Concise by default, max 400 characters."
     )
+    provenance: str | None = Field(
+        default=None, description="Source or provenance of the entity information."
+    )
     importance: float | None = Field(
         default=None,
         description="Importance score of the entity (0.0 to 1.0). Optional field for prioritization.",
@@ -139,6 +143,9 @@ class LLMGraphUpdateEntity(ChainOfThoughts):
 
     id: str = Field(description="Unique identifier of the entity to update.")
     name: str = Field(description="Updated human-readable name of the entity.")
+    provenance: str | None = Field(
+        default=None, description="Source or provenance of the entity information."
+    )
     type: EntityType = Field(description="Updated type of the entity.")
     content: str = Field(description="Updated content or description of the entity.")
 
@@ -416,3 +423,30 @@ class LLMEntityResolutionResult(ChainOfThoughts):
         default_factory=list,
         description="List of issues that were resolved by this operation",
     )
+
+
+@dataclass
+class GraphHookIterativeConfig:
+    """Configuration for graph pre-hook query generation.
+
+    Controls the single-pass query generation with optional retry for empty results.
+    """
+
+    max_queries: int = 3  # Maximum number of queries to generate
+    max_query_retries: int = 2  # Retry queries with agent feedback if they return empty
+
+
+@dataclass
+class GraphIngestionIterativeConfig:
+    """Configuration for iterative entity resolution in graph post-hook.
+
+    Enables multi-pass extraction with entity resolution to improve graph quality
+    by deduplicating entities and normalizing names before import.
+    """
+
+    max_iterations: int = 2  # 1 extraction + up to 1 resolution pass
+    quality_threshold: float = 0.8  # 0.0-1.0 scale for early termination
+    enable_entity_resolution: bool = True  # Run entity deduplication agent
+    enable_name_normalization: bool = True  # Fix verbose entity names
+    enable_quality_assessment: bool = True  # Run quality check before resolution
+    max_import_retries: int = 3  # Max retries for validation/import with agent fixes

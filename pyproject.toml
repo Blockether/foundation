@@ -13,10 +13,9 @@ dependencies = [
     "pydantic>=2.12.5",
     "tenacity>=9.1.2",
     "tantivy>=0.25.1",
-    "agno>=2.3.21",
+    "agno>=2.3.24",
     "sqlalchemy>=2.0.45",
     "numpy>=2.2.6",
-    "baml-py>=0.216.0",
 ]
 
 [project.optional-dependencies]

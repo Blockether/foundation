@@ -1,149 +1,104 @@
-# General context
+# PROJECT KNOWLEDGE BASE
 
-## Project Overview
+**Generated:** 2026-01-08
+**Mode:** Update (existing CLAUDE.md preserved)
 
-Python 3.13+ project using `uv` for package management. Source code in `src/blockether_foundation/`, tests in `tests/unit/` and `tests/integration/`.
+## OVERVIEW
 
-## Package Management
+Python 3.13+ multi-agent system with graph database, using uv for package management. VRACEF consensus agents, Tantivi indices, Telegram interface.
 
-**Use uv only.** All dependency management goes through `pyproject.toml`.
+## STRUCTURE
+
+```
+./
+├── src/blockether_foundation/
+│   ├── agents/        # Multi-agent consensus system (VRACEF, dual translation)
+│   ├── graph/         # Graph database + Tantivi indices
+│   ├── asr/           # ASR service
+│   ├── tts/           # TTS service
+│   └── os/            # OS interfaces (Telegram)
+├── tests/unit/        # Unit tests (30 files)
+└── tests/integration/ # Integration tests (12 files)
+```
+
+## WHERE TO LOOK
+
+| Task | Location | Notes |
+|------|----------|-------|
+| Agent consensus logic | src/blockether_foundation/agents/vracef.py | VRACEF implementation |
+| Graph operations | src/blockether_foundation/graph/ | Entity resolution, indices |
+| Core utilities | src/blockether_foundation/concurrency.py, result.py | ConcurrentProcessor, Result |
+| Test patterns | tests/unit/ | pytest markers, fixtures |
+| Config | pyproject.toml | ruff, pyright, pytest |
+
+## CODE MAP
+
+```
+Key symbols (AST-grep discovered):
+- class ConcurrentProcessor (concurrency.py) - batch concurrent ops with retry
+- class Result (result.py) - Rust-like error handling
+- class VRACEF (agents/vracef.py) - consensus agent
+- class DualTranslationAgent (agents/dual_translation.py) - translation
+- class GraphDatabase (graph/database.py) - graph operations
+- class EntityResolver (graph/) - entity resolution
+- class TranscriptionService (transcriber.py) - ASR/TTS
+```
+
+## CONVENTIONS
+
+- Package management: uv only (no pip)
+- Type hints: Required, checked by pyright
+- Async: Use async/await for I/O operations
+- Testing: pytest with markers (unit, integration, agno_eval, performance_test, slow, asyncio)
+- Linting: ruff (line-length 100), pyright (strict mode)
+- Error handling: Result[T, E] for explicit errors (Rust-like)
+- Concurrency: ConcurrentProcessor for batch operations with retry logic
+
+## ANTI-PATTERNS (THIS PROJECT)
+
+- DO NOT use pip directly - use uv
+- DO NOT suppress type errors with @ts-ignore / @ts-expect-error
+- DO NOT use empty catch blocks in error handling
+- NEVER delete failing tests to pass
+- NEVER commit without explicit request
+- DO NOT use generic logging - use structured logging
+
+## UNIQUE STYLES
+
+- XML construction in docstrings: Use """ triple-quoted for multi-line XML in response_parts lists
+- ConcurrentProcessor guarantees: order preservation, atomic processing, exponential backoff
+- Result pattern: Ok(value), Err(error), unwrap(), map(), and_then()
+- Test markers: -m unit (default), -m integration, -m agno_eval, -m performance_test, -m slow, -m asyncio
+
+## COMMANDS
 
 ```bash
-# Install dependencies
-uv sync --all-extras
+# Package management
+uv sync --all-extras          # Install all dependencies
+uv add package-name           # Add dependency
+uv run <command>              # Run in venv
 
-# Add a dependency
-uv add package-name
+# Testing
+uv run pytest                 # Run all tests
+uv run pytest -m unit         # Run unit tests
+uv run pytest -m integration  # Run integration tests
+uv run pytest tests/path/test_file.py::test_func  # Run specific test
 
-# Run commands in venv
-uv run <command>
+# Quality
+uv run ruff check .           # Lint
+uv run ruff format .          # Format
+uv run pyright src/           # Type check
+
+# Task runner
+uv run poe lint               # Lint
+uv run poe test               # Test
+uv run poe test-integration   # Integration tests
 ```
 
-## Inspecting Library Code
+## NOTES
 
-When you need to understand how a library works, you can read its source code directly:
-
-```bash
-# Path to installed packages
-.venv/lib/python3.13/site-packages/[library-name]/
-```
-
-Example: `read .venv/lib/python3.13/site-packages/requests/sessions.py`
-
-## Running Tests
-
-### Run all tests
-```bash
-uv run pytest
-```
-
-### Run single test file
-```bash
-uv run pytest tests/path/to/test_file.py
-```
-
-### Run specific test
-```bash
-uv run pytest tests/path/to/test_file.py::test_function_name
-```
-
-### With markers
-```bash
-# Run unit tests (default)
-uv run pytest -m unit
-
-# Run integration tests
-uv run pytest -m integration
-
-# Run async tests
-uv run pytest -m asyncio
-```
-
-Available markers: `unit`, `integration`, `agno_eval`, `performance_test`, `slow`, `asyncio`
-
-## Quality Tools
-
-```bash
-# Linting and formatting (ruff)
-uv run ruff check .
-uv run ruff format .
-
-# Type checking (pyright)
-uv run pyright src/
-```
-
-## Task Runner
-
-Use `poe` for common tasks:
-```bash
-uv run poe lint
-uv run poe test
-uv run poe test-integration
-```
-
-## Core Utilities
-
-### Concurrency (`src/blockether_foundation/concurrency.py`)
-
-Use `ConcurrentProcessor` for concurrent batch processing with automatic retry logic:
-
-```python
-from blockether_foundation.concurrency import ConcurrentProcessor
-
-processor = ConcurrentProcessor(
-    concurrency=5,           # Max parallel operations
-    max_retries=3,           # Retry attempts
-    retry_min_wait=3500,    # Min wait between retries (ms)
-    retry_max_wait=15000,   # Max wait between retries (ms)
-)
-
-results = await processor.process(items, processor_fn)
-```
-
-Guarantees:
-- Order preservation (results returned in same order as inputs)
-- Atomic processing (all items succeed or all fail)
-- Exponential backoff retry logic
-
-**Important**: When returning multiple values from processor_fn, wrap tuples as lists:
-```python
-# Correct
-async def processor_fn(item) -> list[Output]:
-    return [result1, result2]
-
-# Also works (tuples are treated as sequences)
-async def processor_fn(item) -> tuple[Output, ...]:
-    return (result1, result2)
-```
-
-### Error Handling (`src/blockether_foundation/result.py`)
-
-Use `Result[T, E]` for explicit error handling (Rust-like):
-
-```python
-from blockether_foundation.result import Result
-from blockether_foundation.errors import FoundationBaseError
-
-# Create results
-result = Result.Ok(value)
-result = Result.Err(error)
-
-# Extract values
-value = result.unwrap()               # Raises if Err
-value = result.unwrap_or(default)     # Returns default if Err
-value = result.expect("message")      # Raises with custom message
-
-# Chain operations
-result.map(transform_fn)              # Transform Ok value
-result.and_then(lambda x: ...)        # Chain Result-returning operations
-result.or_else(lambda e: ...)         # Provide fallback if Err
-```
-
-## Code Conventions
-
-- Type hints required (checked by pyright)
-- Use async/await for I/O operations
-- Follow ruff formatting
-- Write tests for new features
-- Use `Result` for explicit error handling
-- Use `ConcurrentProcessor` for batch concurrent operations
+- Project uses strict pyright mode - no type suppression allowed
+- Test integration tests skipped by default (-m not integration)
+- ConcurrentProcessor: When returning multiple values, wrap tuples as lists
+- Result: Use .unwrap_or(default) or .expect("message") instead of try/catch where possible
+- XML in docstrings: Multi-line XML must use triple quotes with embedded newlines in response_parts lists

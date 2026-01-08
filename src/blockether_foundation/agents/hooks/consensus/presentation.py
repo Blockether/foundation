@@ -35,10 +35,7 @@ GRAY_50 = "#F9FAFB"
 GRAY_600 = "#4B5563"
 
 if TYPE_CHECKING:
-    from blockether_foundation.agents.hooks.consensus.core import (
-        ConsensusResult,
-        CritiqueSummary,
-    )
+    from blockether_foundation.agents.hooks.consensus.models import ConsensusResult
 
 
 def _escape_js_string(s: str) -> str:
@@ -54,9 +51,72 @@ def _get_score_color(score: float) -> str:
         return GRAY_500
 
 
-def _generate_step_navigation() -> str:
+def _format_assumption(assumption: str) -> tuple[str, str | None]:
+    """Parse and format an assumption string.
+
+    Args:
+        assumption: Raw assumption string, possibly in 'key=value key=value' format
+
+    Returns:
+        Tuple of (formatted_text, criticality_badge_html or None)
+    """
+    import re
+
+    # Look for patterns like criticality=0.9, assumption=..., etc.
+    # This pattern captures key=value pairs where value can contain spaces
+    pattern = r"(\w+)=(.+?)(?=\s+\w+=|$)"
+    matches = re.findall(pattern, assumption)
+
+    if not matches or len(matches) == 1:
+        # No clear key=value pairs, return as-is
+        return assumption, None
+
+    # Parse into dict
+    data: dict[str, str] = {}
+    for key, value in matches:
+        # Clean up the value (remove extra spaces, quotes)
+        value = value.strip()
+        if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        elif len(value) >= 2 and value.startswith("'") and value.endswith("'"):
+            value = value[1:-1]
+        data[key] = value
+
+    # Extract the main assumption text
+    assumption_text = data.get("assumption", data.get("a", assumption))
+
+    # Build criticality badge if present
+    criticality_badge = None
+    criticality = data.get("criticality", data.get("c"))
+    if criticality:
+        try:
+            crit_val = float(criticality)
+            crit_color = _get_score_color(crit_val)
+            criticality_badge = (
+                f'<span class="text-xs" style="color: {crit_color};">● {crit_val:.0%}</span>'
+            )
+        except (ValueError, TypeError):
+            pass
+
+    return assumption_text, criticality_badge
+
+
+def _generate_step_navigation(has_hitl: bool = False) -> str:
     """Generate sticky step navigation."""
-    return """    <nav class="step-nav">
+    hitl_step = ""
+    if has_hitl:
+        hitl_step = """            <div class="step-item" data-step-target="hitl">
+                <span class="step-number">4</span>
+                <span>User Feedback</span>
+            </div>
+"""
+
+    gossip_num = "5" if has_hitl else "4"
+    eval_num = "6" if has_hitl else "5"
+    conflicts_num = "7" if has_hitl else "6"
+    decision_num = "8" if has_hitl else "7"
+
+    return f"""    <nav class="step-nav">
         <div class="step-nav-inner">
             <div class="step-item active" data-step-target="goal">
                 <span class="step-number">1</span>
@@ -70,20 +130,20 @@ def _generate_step_navigation() -> str:
                 <span class="step-number">3</span>
                 <span>Results</span>
             </div>
-            <div class="step-item" data-step-target="gossip">
-                <span class="step-number">4</span>
+{hitl_step}            <div class="step-item" data-step-target="gossip">
+                <span class="step-number">{gossip_num}</span>
                 <span>Gossip</span>
             </div>
             <div class="step-item" data-step-target="evaluation">
-                <span class="step-number">5</span>
+                <span class="step-number">{eval_num}</span>
                 <span>Evaluation</span>
             </div>
             <div class="step-item" data-step-target="conflicts">
-                <span class="step-number">6</span>
+                <span class="step-number">{conflicts_num}</span>
                 <span>Conflicts Resolution</span>
             </div>
             <div class="step-item" data-step-target="decision">
-                <span class="step-number">7</span>
+                <span class="step-number">{decision_num}</span>
                 <span>Decision</span>
             </div>
         </div>
@@ -279,13 +339,25 @@ def _generate_raw_outputs_section(result: ConsensusResult) -> str:
         if gen_output.assumptions:
             assumptions_list: list[str] = []
             for a in gen_output.assumptions:
-                assumptions_list.append(
-                    f'<li class="flex items-start gap-2 py-1"><span class="text-gray-400">-</span>'
-                    f"<span>{html.escape(a)}</span></li>"
-                )
+                assumption_text, criticality_badge = _format_assumption(a)
+                if criticality_badge:
+                    assumptions_list.append(
+                        f'<li class="flex items-center gap-2 py-1">'
+                        f'<span class="text-gray-400 flex-shrink-0">•</span>'
+                        f'<span class="flex-1">{html.escape(assumption_text)}</span>'
+                        f"{criticality_badge}"
+                        f"</li>"
+                    )
+                else:
+                    assumptions_list.append(
+                        f'<li class="flex items-start gap-2 py-1">'
+                        f'<span class="text-gray-400 flex-shrink-0">•</span>'
+                        f"<span>{html.escape(assumption_text)}</span>"
+                        f"</li>"
+                    )
             assumptions_html = f"""                <div class="mt-3 pt-3 border-t border-gray-200">
                     <h4 class="text-xs font-semibold text-gray-700 mb-2">Assumptions ({len(gen_output.assumptions)})</h4>
-                    <ul class="space-y-3 text-sm text-gray-600">
+                    <ul class="space-y-2 text-sm text-gray-600">
                         {"".join(assumptions_list)}
                     </ul>
                 </div>"""
@@ -407,6 +479,117 @@ def _generate_raw_outputs_section(result: ConsensusResult) -> str:
     </section>"""
 
 
+def _generate_hitl_section(result: ConsensusResult) -> str:
+    if not result.hitl_iterations:
+        return ""
+
+    iterations_html: list[str] = []
+    for hitl_iter in result.hitl_iterations:
+        confidence_before_color = _get_score_color(hitl_iter.synthesis_before_confidence)
+        confidence_after_color = _get_score_color(hitl_iter.synthesis_after_confidence)
+        confidence_delta = (
+            hitl_iter.synthesis_after_confidence - hitl_iter.synthesis_before_confidence
+        )
+        delta_sign = "+" if confidence_delta >= 0 else ""
+        delta_color = SUCCESS_GREEN if confidence_delta >= 0 else WARNING_AMBER
+
+        questions_html: list[str] = []
+        for q in hitl_iter.questionnaire.questions:
+            options_parts: list[str] = []
+            for opt in q.options:
+                desc_html = (
+                    f'<span class="text-xs text-gray-500">- {html.escape(opt.description)}</span>'
+                    if opt.description
+                    else ""
+                )
+                options_parts.append(
+                    f'<div class="flex items-center gap-2 p-2 border border-gray-200 hover:bg-gray-50">'
+                    f'<span class="text-xs font-mono text-gray-500">{opt.option_id}</span>'
+                    f'<span class="text-sm text-gray-700">{html.escape(opt.label)}</span>'
+                    f"{desc_html}"
+                    f"</div>"
+                )
+            options_html = "\n".join(options_parts)
+
+            answer_html = ""
+            matching_answer = next(
+                (a for a in hitl_iter.user_answers if a.question_id == q.question_id), None
+            )
+            if matching_answer:
+                if matching_answer.selected_labels:
+                    labels_str = ", ".join(
+                        html.escape(label) for label in matching_answer.selected_labels
+                    )
+                    answer_html = f"""<div class="mt-2 p-2 bg-green-50 border-l-2 border-green-400">
+                        <span class="text-xs font-semibold text-green-700">User Answer:</span>
+                        <span class="text-sm text-green-800">{labels_str}</span>
+                    </div>"""
+                if matching_answer.free_text_response:
+                    answer_html += f"""<div class="mt-2 p-2 bg-blue-50 border-l-2 border-blue-400">
+                        <span class="text-xs font-semibold text-blue-700">Free Text:</span>
+                        <span class="text-sm text-blue-800">{html.escape(matching_answer.free_text_response)}</span>
+                    </div>"""
+
+            category_html = (
+                f'<span class="text-xs text-gray-500">Category: {html.escape(q.category)}</span>'
+                if q.category
+                else ""
+            )
+            questions_html.append(f"""            <div class="border border-gray-200 p-4 mb-3">
+                <div class="flex items-start justify-between gap-4 mb-3">
+                    <div class="flex-1">
+                        <span class="text-xs font-mono text-gray-400">{q.question_id}</span>
+                        <h4 class="font-medium text-gray-900 mt-1">{html.escape(q.question_text)}</h4>
+                        {category_html}
+                    </div>
+                </div>
+                <div class="space-y-1">
+{options_html}
+                </div>
+{answer_html}
+            </div>""")
+
+        synthesis_preview = (
+            hitl_iter.synthesis_output_after[:500] + "..."
+            if len(hitl_iter.synthesis_output_after) > 500
+            else hitl_iter.synthesis_output_after
+        )
+        num_questions = len(hitl_iter.questionnaire.questions)
+
+        iterations_html.append(f"""        <div class="card p-5 mb-4" style="border-left: 4px solid {GRAY_700};">
+            <div class="flex items-center justify-between mb-4">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 flex items-center justify-center text-white font-bold" style="background-color: {GRAY_700};">
+                        {hitl_iter.iteration}
+                    </div>
+                    <div>
+                        <h3 class="font-semibold text-gray-900">HITL Iteration {hitl_iter.iteration}</h3>
+                        <div class="flex items-center gap-4 mt-1 text-sm">
+                            <span>Confidence: <span style="color: {confidence_before_color}">{hitl_iter.synthesis_before_confidence:.0%}</span> → <span style="color: {confidence_after_color}">{hitl_iter.synthesis_after_confidence:.0%}</span></span>
+                            <span class="status-badge" style="background: {delta_color}20; color: {delta_color};">{delta_sign}{confidence_delta:.0%}</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="text-sm text-gray-500">{num_questions} questions</div>
+            </div>
+            <div class="mb-4">
+                <h4 class="text-sm font-semibold text-gray-800 mb-3">Questions Asked</h4>
+{"".join(questions_html)}
+            </div>
+            <div class="mt-4 p-3 bg-gray-50">
+                <h4 class="text-sm font-semibold text-gray-800 mb-2">Synthesis After Feedback</h4>
+                <pre class="raw-output text-sm text-gray-700">{html.escape(synthesis_preview)}</pre>
+            </div>
+        </div>""")
+
+    return f"""    <!-- HITL - User Feedback Iterations -->
+    <section class="report-section mb-8" data-step="hitl">
+        <h2 class="text-lg font-semibold text-gray-900 mb-4">User Feedback <span class="text-sm text-gray-500">({len(result.hitl_iterations)} iteration{"" if len(result.hitl_iterations) == 1 else "s"})</span></h2>
+        <div class="space-y-4">
+{"".join(iterations_html)}
+        </div>
+    </section>"""
+
 
 def _generate_critique_matrix_section(result: ConsensusResult) -> str:
     """Generate critique matrix visualization showing strengths/weaknesses between models with verified claims."""
@@ -442,6 +625,82 @@ def _generate_critique_matrix_section(result: ConsensusResult) -> str:
             else "<span class='text-gray-400 italic'>No details</span>"
         )
 
+        factual_summary = ""
+        if cs.checked_claims:
+            factual_color = (
+                _get_score_color(cs.factual_accuracy_score)
+                if cs.factual_accuracy_score is not None
+                else GRAY_500
+            )
+            factual_summary = f"""                    <div class="mt-2 pt-2 border-t border-gray-200">
+                        <div class="flex items-center justify-between text-xs">
+                            <span class="text-gray-500">Factual Accuracy</span>
+                            <div class="flex items-center gap-2">
+                                <div class="flex-1 bg-gray-200 h-1.5 w-12">
+                                    <div class="h-1.5" style="background-color: {factual_color}; width: {(cs.factual_accuracy_score or 0) * 100:.0f}%"></div>
+                                </div>
+                                <span class="font-medium" style="color: {factual_color};">{(cs.factual_accuracy_score or 0):.0%}</span>
+                            </div>
+                        </div>
+                        <div class="flex gap-3 mt-1 text-xs text-gray-600">
+                            <span>✓ {len(cs.accurate_claims)} accurate</span>
+                            <span>✗ {len(cs.inaccurate_claims)} inaccurate</span>
+                            <span>({len(cs.checked_claims)} total)</span>
+                        </div>
+                    </div>"""
+
+        claims_details = ""
+        if cs.checked_claims:
+            accurate_claims_html = (
+                "\n".join(
+                    f'                        <div class="flex items-start gap-2 p-2 bg-green-50 border-l-2 border-green-400">'
+                    f'<span class="text-green-600 text-xs">✓</span>'
+                    f"<div class='flex-1'>"
+                    f'<div class="text-sm text-gray-900">{html.escape(c.claim_text)}</div>'
+                    f'<div class="text-xs text-gray-500">Confidence: {c.confidence:.0%}</div>'
+                    f"</div>"
+                    f"</div>"
+                    for c in cs.accurate_claims
+                )
+                if cs.accurate_claims
+                else '<div class="text-xs text-gray-400 italic">No accurate claims</div>'
+            )
+
+            inaccurate_claims_html = (
+                "\n".join(
+                    f'                        <div class="flex items-start gap-2 p-2 bg-red-50 border-l-2 border-red-400">'
+                    f'<span class="text-red-600 text-xs">✗</span>'
+                    f"<div class='flex-1'>"
+                    f'<div class="text-sm text-gray-900">{html.escape(c.claim_text)}</div>'
+                    f'<div class="text-xs text-gray-500">Confidence: {c.confidence:.0%}</div>'
+                    f'<div class="text-xs text-red-600 mt-1"><span class="font-medium">Correction:</span> {html.escape(c.correction)}</div>'
+                    f"</div>"
+                    f"</div>"
+                    for c in cs.inaccurate_claims
+                    if c.correction
+                )
+                if any(c.correction for c in cs.inaccurate_claims)
+                else '<div class="text-xs text-gray-400 italic">No inaccurate claims</div>'
+            )
+
+            claims_details = f"""                    <div class="claims-details mt-3 pt-3 border-t border-gray-200">
+                        <h5 class="text-xs font-semibold text-gray-700 mb-2">Factual Claims Verification</h5>
+                        <div class="space-y-3">
+                            <div>
+                                <div class="text-xs font-medium text-green-700 mb-2">Accurate Claims ({len(cs.accurate_claims)})</div>
+                                <div class="space-y-1">
+{accurate_claims_html}
+                                </div>
+                            </div>
+                            <div>
+                                <div class="text-xs font-medium text-red-700 mb-2">Inaccurate Claims ({len(cs.inaccurate_claims)})</div>
+                                <div class="space-y-1">
+{inaccurate_claims_html}
+                                </div>
+                            </div>
+                        </div>
+                    </div>"""
+
         table_rows.append(f"""            <tr>
                 <td>
                     <div class="font-medium text-gray-900">{html.escape(cs.reviewer_name)}</div>
@@ -462,6 +721,8 @@ def _generate_critique_matrix_section(result: ConsensusResult) -> str:
                 </td>
                 <td class="text-sm text-gray-600 max-w-md">
                     {summary_text}
+{factual_summary}
+{claims_details}
                 </td>
             </tr>""")
 
@@ -735,10 +996,9 @@ def generate_consensus_report_html(
         PRIMARY_YELLOW=PRIMARY_YELLOW,
     )
 
-    # Build step navigation
-    step_nav = _generate_step_navigation()
+    has_hitl = bool(result.hitl_iterations)
+    step_nav = _generate_step_navigation(has_hitl=has_hitl)
 
-    # Build all sections
     sections = "\n".join(
         filter(
             None,
@@ -746,6 +1006,7 @@ def generate_consensus_report_html(
                 _generate_task_section(result),
                 _generate_judge_criteria_section(result),
                 _generate_raw_outputs_section(result),
+                _generate_hitl_section(result),
                 _generate_summary_section(result),
                 _generate_critique_matrix_section(result),
                 _generate_judge_results_section(result),

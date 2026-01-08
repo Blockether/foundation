@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import html
 from pathlib import Path
-from textwrap import dedent
 from typing import Any, cast
 
 from agno.agent.agent import Agent
@@ -18,11 +18,9 @@ from agno.models.base import Model
 from agno.run.agent import RunInput
 from agno.session import AgentSession, TeamSession
 from agno.team import Team
-from agno.utils.log import log_debug, log_error  # type: ignore
-from pydantic import Field, field_validator
+from agno.utils.log import log_debug  # type: ignore
 
 from ....concurrency import ConcurrentProcessor
-from ....models import BaseModelSerializable, ChainOfThoughts
 from ....utils import (
     AgnoPreHook,
     DebugMode,
@@ -31,485 +29,31 @@ from ....utils import (
     format_main_agent_context,
     inject_context_to_run_input,
 )
-from .hitl import ConsensusHITLToolkit, HITLQuestionnaire
-
-
-class KeyInsight(ChainOfThoughts):
-    """A key insight with reasoning about why it matters."""
-
-    insight: str = Field(description="The insight itself.")
-    evidence: str | None = Field(
-        default=None, description="Supporting evidence or examples for this insight."
-    )
-
-
-class MissingConsideration(ChainOfThoughts):
-    """An important aspect that was missed, with reasoning about its importance."""
-
-    consideration: str = Field(description="The consideration that was missed.")
-    suggested_action: str | None = Field(
-        default=None, description="What should be done to address this missing consideration."
-    )
-
-
-class FlawedAssumption(ChainOfThoughts):
-    """An incorrect or questionable assumption with explanation."""
-
-    assumption: str = Field(description="The flawed assumption that was made.")
-    correct_understanding: str | None = Field(
-        default=None, description="What the correct assumption or understanding should be."
-    )
-
-
-class AgreementPoint(ChainOfThoughts):
-    """A point of agreement between models with reasoning."""
-
-    point: str = Field(description="The point of agreement.")
-    supporting_models: list[str] = Field(
-        default=[], description="Names of models that support this agreement."
-    )
-
-
-class UncertaintyArea(ChainOfThoughts):
-    """An area of remaining uncertainty with analysis."""
-
-    area: str = Field(description="The area where uncertainty remains.")
-    potential_resolution: str | None = Field(
-        default=None, description="How this uncertainty might be resolved."
-    )
-
-
-class SpecificIssue(ChainOfThoughts):
-    """A specific issue identified during evaluation."""
-
-    issue: str = Field(description="Description of the issue.")
-    location: str | None = Field(default=None, description="Where in the output this issue occurs.")
-
-
-class ImprovementSuggestion(ChainOfThoughts):
-    """A suggestion for improvement with expected importance."""
-
-    suggestion: str = Field(description="The improvement suggestion.")
-    implementation_hint: str | None = Field(
-        default=None, description="Hint on how to implement this improvement."
-    )
-
-
-class Contribution(ChainOfThoughts):
-    """A key contribution from a model with importance analysis."""
-
-    contribution: str = Field(description="Description of the contribution.")
-    uniqueness: str | None = Field(
-        default=None, description="What makes this contribution unique or valuable."
-    )
-
-
-class ConsideredAlternative(BaseModelSerializable):
-    approach: str = Field(description="Description of the alternative approach.")
-    why_not_chosen: str | None = Field(
-        default=None,
-        description="Reason this approach was not selected. None if this IS the chosen approach.",
-    )
-    potential_value: float = Field(
-        ge=0.0, le=1.0, description="How valuable this alternative might be (0.0-1.0)."
-    )
-
-
-class ConfidenceBreakdown(ChainOfThoughts):
-    factual_accuracy: float = Field(
-        ge=0.0, le=1.0, description="Confidence in factual correctness."
-    )
-    completeness: float = Field(
-        ge=0.0, le=1.0, description="Confidence that all aspects are covered."
-    )
-    logical_coherence: float = Field(
-        ge=0.0, le=1.0, description="Confidence in logical consistency."
-    )
-    relevance_to_task: float = Field(
-        ge=0.0, le=1.0, description="Confidence output addresses the task."
-    )
-
-
-class GenerationOutput(ChainOfThoughts):
-    output: str = Field(description="The model's main output/answer to the task.")
-    assumptions: list[str] = Field(default=[], description="Assumptions made while generating.")
-    considered_alternatives: list[ConsideredAlternative] = Field(
-        default=[], description="Alternative approaches considered."
-    )
-    confidence_breakdown: ConfidenceBreakdown = Field(...)
-    key_insights: list[KeyInsight] = Field(
-        default=[], description="Main insights this model brings with reasoning and impact."
-    )
-
-
-# ============================================================================
-class TriageDecision(ChainOfThoughts):
-    """Decision on whether a request requires full multi-model consensus research."""
-
-    requires_consensus: bool = Field(
-        description="True if the request requires multi-model consensus research, False otherwise."
-    )
-    reason: str = Field(description="Brief explanation for the decision.")
-    category: str = Field(
-        description="Category of request: 'research', 'implementation', 'clarification', "
-        "'confirmation', 'greeting', 'simple_question', or 'other'."
-    )
-
-
-class StrengthWeakness(BaseModelSerializable):
-    description: str = Field(description="Description of the strength or weakness.")
-    importance: float = Field(ge=0.0, le=1.0, description="Importance or value score (0.0-1.0).")
-    evidence: str = Field(description="Quote or reference from the output.")
-
-
-class CheckedClaim(BaseModelSerializable):
-    claim_text: str = Field(description="The factual claim being checked.")
-    is_accurate: bool = Field(description="True if claim is factually accurate.")
-    correction: str | None = Field(
-        default=None, description="If inaccurate, the correct information."
-    )
-    confidence: float = Field(ge=0.0, le=1.0, description="Confidence in verification (0.0-1.0).")
-
-
-class SuggestedImprovement(BaseModelSerializable):
-    what_to_change: str = Field(description="What should be changed.")
-    why: str = Field(description="Why this change is needed.")
-    proposed_fix: str = Field(description="The proposed fix or improvement.")
-    expected_impact: float = Field(ge=0.0, le=1.0, description="Expected impact (0.0-1.0).")
-
-
-class CritiqueFeedback(ChainOfThoughts):
-    is_self_critique: bool = Field(description="True if critiquing own output.")
-    target_model: str = Field(description="Name of the model being critiqued.")
-    strengths: list[StrengthWeakness] = Field(default=[], description="Identified strengths.")
-    weaknesses: list[StrengthWeakness] = Field(default=[], description="Identified weaknesses.")
-    missing_considerations: list[MissingConsideration] = Field(
-        default=[], description="Important aspects missed with reasoning and impact."
-    )
-    flawed_assumptions: list[FlawedAssumption] = Field(
-        default=[], description="Incorrect assumptions with reasoning and impact."
-    )
-    suggested_improvements: list[SuggestedImprovement] = Field(
-        default=[], description="Improvements."
-    )
-    alternative_approaches: list[ConsideredAlternative] = Field(
-        default=[], description="Better approaches."
-    )
-    checked_claims: list[CheckedClaim] = Field(
-        default=[],
-        description="Factual claims checked for accuracy (includes both accurate and inaccurate claims).",
-    )
-    accurate_claims: list[CheckedClaim] = Field(
-        default=[], description="Factual claims that passed verification."
-    )
-    inaccurate_claims: list[CheckedClaim] = Field(
-        default=[], description="Factual claims that failed verification with corrections."
-    )
-    factual_accuracy_score: float = Field(
-        ge=0.0, le=1.0, default=1.0, description="Overall factual accuracy (0.0-1.0)."
-    )
-    agreement_level: float = Field(ge=0.0, le=1.0, description="Agreement with reviewed output.")
-    overall_quality_score: float = Field(
-        ge=0.0, le=1.0, description="Quality score of reviewed output."
-    )
-
-
-class ConflictResolution(BaseModelSerializable):
-    topic: str = Field(description="What the disagreement was about.")
-    conflicting_positions: dict[str, str] = Field(
-        description="Each model's position (name -> position)."
-    )
-    resolution: str = Field(description="How the conflict was resolved.")
-    resolution_rationale: str = Field(description="Why this resolution was chosen.")
-    winning_model: str | None = Field(default=None, description="Model whose position was adopted.")
-
-
-class IncorporatedInsight(BaseModelSerializable):
-    from_model: str = Field(description="Model that provided this insight.")
-    insight: str = Field(description="The insight that was incorporated.")
-    weight_applied: float = Field(ge=0.0, le=1.0, description="Weight based on model importance.")
-    how_used: str = Field(description="How this insight was used.")
-
-
-class RejectedApproach(BaseModelSerializable):
-    from_model: str = Field(description="Model that proposed this approach.")
-    approach: str = Field(description="The rejected approach.")
-    rejection_reason: str = Field(description="Why it was rejected.")
-    critique_references: list[str] = Field(
-        default=[], description="Critiques that led to rejection."
-    )
-
-
-class ConsensusSynthesis(ChainOfThoughts):
-    synthesized_output: str = Field(description="The synthesized final output.")
-    synthesis_approach: str = Field(description="How the outputs were combined.")
-    incorporated_insights: list[IncorporatedInsight] = Field(
-        default=[], description="Incorporated insights."
-    )
-    conflict_resolutions: list[ConflictResolution] = Field(
-        default=[], description="Resolved conflicts."
-    )
-    rejected_approaches: list[RejectedApproach] = Field(
-        default=[], description="Rejected approaches."
-    )
-    model_contribution_weights: dict[str, float] = Field(
-        default={}, description="Final weights per model."
-    )
-    consensus_confidence: float = Field(ge=0.0, le=1.0, description="Confidence in consensus.")
-    areas_of_strong_agreement: list[AgreementPoint] = Field(
-        default=[], description="Areas of strong agreement with reasoning and confidence."
-    )
-    areas_of_uncertainty: list[UncertaintyArea] = Field(
-        default=[], description="Areas that remain uncertain with reasoning and impact."
-    )
-
-
-class ConsensusSynthesisWithHITL(ConsensusSynthesis):
-    """Synthesis with optional HITL questionnaire - generated in single model call.
-
-    When HITL is enabled, the model generates both the synthesis AND the questionnaire
-    based on uncertainties in a single call, reducing latency.
-    """
-
-    hitl_questionnaire: HITLQuestionnaire | None = Field(
-        default=None,
-        description="Questionnaire for user feedback. None or empty questions if no uncertainties.",
-    )
-
-
-class JudgeCriteria(BaseModelSerializable):
-    name: str = Field(description="Name of the criterion.")
-    description: str = Field(description="What this criterion evaluates.")
-    weight: float = Field(default=1.0, ge=0.0, description="Relative weight.")
-    threshold: float = Field(default=0.7, ge=0.0, le=1.0, description="Minimum score to pass.")
-
-
-class JudgeVerdict(BaseModelSerializable):
-    criterion_name: str = Field(description="Name of the criterion evaluated.")
-    score: float = Field(ge=0.0, le=1.0, description="Score for this criterion.")
-    passed: bool = Field(description="Whether this criterion passed.")
-    reasoning: str = Field(description="Reasoning behind the verdict.")
-    specific_issues: list[SpecificIssue] = Field(
-        default=[], description="Specific issues identified with reasoning and importance."
-    )
-    improvement_suggestions: list[ImprovementSuggestion] = Field(
-        default=[], description="Improvement suggestions with reasoning and expected impact."
-    )
-
-
-class IssueAddressed(ChainOfThoughts):
-    """An issue that was successfully addressed during refinement."""
-
-    criterion_name: str = Field(description="Name of the criterion that was failed.")
-    original_issue: str = Field(
-        description="Description of the original issue from the judge verdict."
-    )
-    how_fixed: str = Field(
-        description="Explanation of how the issue was addressed in the refined output."
-    )
-    changes_made: str = Field(description="Specific changes made to address this issue.")
-
-
-class IssueNotAddressed(ChainOfThoughts):
-    """An issue that could not be addressed during refinement."""
-
-    criterion_name: str = Field(description="Name of the criterion that was failed.")
-    original_issue: str = Field(
-        description="Description of the original issue from the judge verdict."
-    )
-    why_not_addressed: str = Field(
-        description="Explanation of why this issue could not be addressed "
-        "(e.g., insufficient information, inherent limitation, trade-off with other criteria)."
-    )
-    suggested_alternative: str | None = Field(
-        default=None,
-        description="Alternative approach that might address this issue, if any.",
-    )
-
-
-class RefinementResult(ChainOfThoughts):
-    """Structured result from the refinement agent."""
-
-    refined_output: str = Field(description="The refined output text.")
-    issues_addressed: list[IssueAddressed] = Field(
-        default=[],
-        description="Issues that were successfully addressed with details on how.",
-    )
-    issues_not_addressed: list[IssueNotAddressed] = Field(
-        default=[],
-        description="Issues that could not be addressed with explanations.",
-    )
-    additional_improvements: list[str] = Field(
-        default=[],
-        description="Any other improvements made beyond the failed criteria.",
-    )
-
-
-class RefinementAction(BaseModelSerializable):
-    """Record of a refinement action taken on an issue."""
-
-    criterion_name: str = Field(description="Name of the criterion.")
-    issue_description: str = Field(description="Description of the issue from judge verdict.")
-    was_addressed: bool = Field(description="Whether this issue was addressed.")
-    importance: float = Field(ge=0.0, le=1.0, description="Importance of the issue (from verdict).")
-    reasoning: str | None = Field(
-        default=None,
-        description="Explanation of how it was fixed (if addressed) or why not (if not addressed).",
-    )
-    changes_made: str | None = Field(
-        default=None,
-        description="Specific changes made to address the issue (if addressed).",
-    )
-
-
-class JudgeResult(ChainOfThoughts):
-    iteration: int = Field(description="Refinement iteration number.")
-    verdicts: list[JudgeVerdict] = Field(description="Verdicts for each criterion.")
-    overall_score: float = Field(ge=0.0, le=1.0, description="Weighted average score.")
-    passed: bool = Field(description="Whether overall evaluation passed.")
-    refinement_actions: list[RefinementAction] = Field(
-        default=[], description="Refinement actions taken."
-    )
-    refined_output: str | None = Field(default=None, description="Refined output if performed.")
-
-
-class ModelContribution(BaseModelSerializable):
-    model_name: str = Field(description="Name of the model.")
-    importance: float = Field(ge=0.0, le=1.0, description="Model's importance weight.")
-    perspective: str = Field(description="Model's unique perspective.")
-    key_contributions: list[Contribution] = Field(
-        default=[], description="Key contributions with reasoning and impact."
-    )
-    insights_incorporated: int = Field(default=0, description="Insights incorporated count.")
-    insights_rejected: int = Field(default=0, description="Insights rejected count.")
-
-
-class GenerationOutputSummary(BaseModelSerializable):
-    """Full generation output from a single model for reporting."""
-
-    model_name: str = Field(description="Name of the model that generated this output.")
-    importance: float = Field(ge=0.0, le=1.0, description="Model's importance weight.")
-    perspective: str = Field(default="", description="Model's unique perspective.")
-    output: str = Field(description="The model's main output/answer.")
-    assumptions: list[str] = Field(default=[], description="Assumptions made.")
-    considered_alternatives: list[ConsideredAlternative] = Field(
-        default=[], description="Alternative approaches considered."
-    )
-    confidence_breakdown: ConfidenceBreakdown | None = Field(
-        default=None, description="Confidence scores by aspect."
-    )
-    key_insights: list[KeyInsight] = Field(
-        default=[], description="Key insights from this model with reasoning and impact."
-    )
-
-
-class CritiqueSummary(BaseModelSerializable):
-    """Summary of a critique between two models for reporting."""
-
-    reviewer_name: str = Field(description="Name of the reviewing model.")
-    target_name: str = Field(description="Name of the model being critiqued.")
-    is_self_critique: bool = Field(description="True if critiquing own output.")
-    strengths: list[StrengthWeakness] = Field(default=[], description="Identified strengths.")
-    weaknesses: list[StrengthWeakness] = Field(default=[], description="Identified weaknesses.")
-    missing_considerations: list[MissingConsideration] = Field(
-        default=[], description="Important aspects missed with reasoning and impact."
-    )
-    flawed_assumptions: list[FlawedAssumption] = Field(
-        default=[], description="Incorrect assumptions with reasoning and impact."
-    )
-    suggested_improvements: list[SuggestedImprovement] = Field(
-        default=[], description="Suggested improvements."
-    )
-    agreement_level: float = Field(ge=0.0, le=1.0, description="Agreement with reviewed output.")
-    overall_quality_score: float = Field(
-        ge=0.0, le=1.0, description="Quality score of reviewed output."
-    )
-
-
-class ConsensusResult(BaseModelSerializable):
-    user_input: str = Field(description="The original user request/task.")
-    final_output: str = Field(description="The final consensus output.")
-    consensus_confidence: float = Field(ge=0.0, le=1.0, description="Confidence in consensus.")
-    judge_score: float = Field(ge=0.0, le=1.0, description="Final judge score.")
-    refinement_iterations: int = Field(description="Number of refinement iterations.")
-    model_contributions: list[ModelContribution] = Field(description="Model contributions summary.")
-    judge_results: list[JudgeResult] = Field(
-        default=[],
-        description="Detailed judge results per iteration with verdicts and refinements.",
-    )
-    key_agreements: list[AgreementPoint] = Field(
-        default=[], description="Key agreements with reasoning and confidence."
-    )
-    resolved_conflicts: list[ConflictResolution] = Field(
-        default=[], description="Resolved conflicts with full details."
-    )
-    remaining_uncertainties: list[UncertaintyArea] = Field(
-        default=[], description="Remaining uncertainties with reasoning and impact."
-    )
-    generation_summary: str = Field(description="Generation phase summary.")
-    critique_summary: str = Field(description="Critique phase summary.")
-    synthesis_summary: str = Field(description="Synthesis phase summary.")
-    judge_summary: str = Field(description="Judge phase summary.")
-
-    raw_generation_outputs: list[GenerationOutputSummary] = Field(
-        default=[],
-        description="Full generation outputs from each model.",
-    )
-    critique_matrix: list[CritiqueSummary] = Field(
-        default=[],
-        description="Complete critique data between all model pairs.",
-    )
-    incorporated_insights: list[IncorporatedInsight] = Field(
-        default=[],
-        description="All insights incorporated with weights and usage.",
-    )
-    conflict_resolutions: list[ConflictResolution] = Field(
-        default=[],
-        description="Full conflict resolution details with positions.",
-    )
-    rejected_approaches: list[RejectedApproach] = Field(
-        default=[],
-        description="Approaches that were rejected with reasons.",
-    )
-    synthesis_approach: str = Field(
-        default="",
-        description="How the outputs were combined.",
-    )
-    judge_criteria_used: list[JudgeCriteria] = Field(
-        default=[],
-        description="The criteria used for judging.",
-    )
-
-    def export_report_to_html(
-        self,
-        output_path: str | Path,
-        title: str = "Consensus Decision Report",
-    ) -> Path:
-        """Export consensus result to an interactive HTML report with D3.js visualization."""
-        from blockether_foundation.agents.hooks.consensus.presentation import (
-            export_consensus_report_to_html,
-        )
-
-        return export_consensus_report_to_html(self, output_path, title)
-
-
-class ModelConfig(BaseModelSerializable):
-    model: Model = Field(description="The Agno model instance.")
-    name: str = Field(description="Name/identifier for this model.")
-    importance: float = Field(default=0.5, ge=0.0, le=1.0, description="Weight factor (0.0-1.0).")
-    perspective: str = Field(default="", description="Unique perspective description.")
-    tools: list[Any] = Field(default=[], description="Tools available during Generation phase.")
-    verification_tools: list[Any] = Field(
-        default=[],
-        description="Tools available during CoVe Verification phase (e.g., search, RAG).",
-    )
-
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, v: str) -> str:
-        if not v:
-            raise ValueError("name cannot be empty")
-        return v
+from . import prompts
+from .hitl import ConsensusHITLToolkit
+from .models import (
+    ConsensusResult,
+    ConsensusSynthesis,
+    ConsensusSynthesisWithHITL,
+    Contribution,
+    CritiqueFeedback,
+    CritiqueSummary,
+    CritiqueTask,
+    GenerationOutput,
+    GenerationOutputSummary,
+    HITLIteration,
+    HITLQuestionnaire,
+    ImprovementSuggestion,
+    JudgeCriteria,
+    JudgeResult,
+    JudgeVerdict,
+    ModelConfig,
+    ModelContribution,
+    RefinementAction,
+    RefinementResult,
+    SpecificIssue,
+    TriageDecision,
+)
 
 
 class ConsensusHooksConfig:
@@ -617,71 +161,8 @@ async def _run_triage_check(
 
     main_agent_context = format_main_agent_context(parent_agent)
 
-    instructions_text = dedent(f"""
-        {main_agent_context}
-
-        <triage_instructions>
-            <task>Quickly determine if this request requires multi-model consensus research.</task>
-            <requirements>
-                <requirement>Analyze the user's request to understand its nature</requirement>
-                <requirement>Determine if it needs deep research, analysis, or implementation planning</requirement>
-                <requirement>Direct requests to perform consensus should trigger consensus</requirement>
-                <requirement>Simple requests should NOT go through consensus</requirement>
-            </requirements>
-            <skip_consensus_for>
-                <type>Greetings and casual conversation (hello, hi, how are you)</type>
-                <type>Simple confirmations (yes, no, proceed, go ahead, ok)</type>
-                <type>Clarification questions about previous responses</type>
-                <type>Requests to summarize or repeat information</type>
-                <type>Simple factual questions with straightforward answers</type>
-                <type>Thank you messages or acknowledgments</type>
-                <type>Small talk or off-topic chat</type>
-            </skip_consensus_for>
-            <require_consensus_for>
-                <type>Complex research questions requiring multiple perspectives</type>
-                <type>Implementation planning for code changes</type>
-                <type>Analysis of codebases, architectures, or systems</type>
-                <type>Problem-solving requiring deep thought</type>
-                <type>Tasks that benefit from critique and synthesis</type>
-                <type>Requests explicitly asking for research or analysis</type>
-            </require_consensus_for>
-        </triage_instructions>
-    """)
-
-    expected_output_text = dedent("""
-        <examples>
-            <example input="Hello, how are you?">
-                <requires_consensus>false</requires_consensus>
-                <reason>Simple greeting, no research needed</reason>
-                <category>greeting</category>
-            </example>
-            <example input="Yes, please proceed with the implementation">
-                <requires_consensus>false</requires_consensus>
-                <reason>User confirmation to proceed, no analysis needed</reason>
-                <category>confirmation</category>
-            </example>
-            <example input="I want you to perform consensus on this topic [topic]">
-                <requires_consensus>true</requires_consensus>
-                <reason>User explicitly requested consensus</reason>
-                <category>consensus_request</category>
-            </example>
-            <example input="Can you explain what you meant by X?">
-                <requires_consensus>false</requires_consensus>
-                <reason>Clarification question about previous response</reason>
-                <category>clarification</category>
-            </example>
-            <example input="I need to implement a new authentication system">
-                <requires_consensus>true</requires_consensus>
-                <reason>Complex implementation requiring research and planning</reason>
-                <category>implementation</category>
-            </example>
-            <example input="Analyze the codebase and find security vulnerabilities">
-                <requires_consensus>true</requires_consensus>
-                <reason>Deep analysis task requiring multiple perspectives</reason>
-                <category>research</category>
-            </example>
-        </examples>
-    """)
+    instructions_text = prompts.build_triage_instructions(main_agent_context)
+    expected_output_text = prompts.TRIAGE_EXAMPLES
 
     agent = create_agent_with_instructions(
         description="Triage Agent",
@@ -716,63 +197,10 @@ async def _run_round_1_generation(
     async def generate_for_model(
         model_config: ModelConfig,
     ) -> list[tuple[ModelConfig, GenerationOutput]]:
-        perspective_xml = ""
-        if model_config.perspective:
-            perspective_xml = f"<model_perspective>{model_config.perspective}</model_perspective>"
-
-        instructions_text = dedent(f"""
-            {main_agent_context}
-
-            <generation_instructions>
-                <task>Generate a response to given task with step-by-step reasoning.</task>
-                {perspective_xml}
-                <requirements>
-                    <requirement>DO NOT use markdown formatting - use plain text with proper spacing and newlines</requirement>
-                    <requirement>Consider multiple approaches before settling on one</requirement>
-                    <requirement>Document your assumptions explicitly with criticality scores</requirement>
-                    <requirement>Break down your confidence by different aspects (factual, completeness, coherence, relevance)</requirement>
-                    <requirement>Identify key insights you bring to this task</requirement>
-                </requirements>
-            </generation_instructions>
-        """)
-
-        expected_output_text = dedent("""
-            <example task="What is the best programming language for beginners?">
-                <output>Python is the best programming language for beginners because of its readable syntax, extensive learning resources, and versatile applications.</output>
-                <assumptions>
-                    <assumption criticality="0.7">Beginner means someone with no prior programming experience</assumption>
-                    <assumption criticality="0.5">User wants a general-purpose language, not domain-specific</assumption>
-                </assumptions>
-                <considered_alternatives>
-                    <alternative potential_value="0.6">
-                        <approach>JavaScript - widely used for web development</approach>
-                        <why_not_chosen>Async patterns and browser APIs add complexity for beginners</why_not_chosen>
-                    </alternative>
-                    <alternative potential_value="0.4">
-                        <approach>Scratch - visual programming for absolute beginners</approach>
-                        <why_not_chosen>Limited real-world applicability after learning</why_not_chosen>
-                    </alternative>
-                </considered_alternatives>
-                <confidence_breakdown>
-                    <factual_accuracy>0.85</factual_accuracy>
-                    <completeness>0.75</completeness>
-                    <logical_coherence>0.90</logical_coherence>
-                    <relevance_to_task>0.95</relevance_to_task>
-                </confidence_breakdown>
-                <key_insights>
-                    <insight importance="0.9">
-                        <insight>Learning curve matters more than language power for beginners</insight>
-                        <reasoning>Beginners are more likely to give up if they encounter too much complexity early on</reasoning>
-                        <evidence>Python's popularity in educational settings like Code.org and university intro courses</evidence>
-                    </insight>
-                    <insight importance="0.7">
-                        <insight>Community support accelerates learning</insight>
-                        <reasoning>Having access to help and resources reduces frustration and speeds up problem-solving</reasoning>
-                        <evidence>Stack Overflow shows Python has the most beginner questions with high-quality answers</evidence>
-                    </insight>
-                </key_insights>
-            </example>
-        """)
+        instructions_text = prompts.build_generation_instructions(
+            main_agent_context, model_config.perspective
+        )
+        expected_output_text = prompts.build_generation_example()
 
         agent = create_agent_with_instructions(
             description=f"Model {model_config.name}",
@@ -796,9 +224,6 @@ async def _run_round_1_generation(
     return list(results)
 
 
-CritiqueTask = tuple[ModelConfig, ModelConfig, GenerationOutput, bool]
-
-
 async def _run_round_2_critique(
     models: list[ModelConfig],
     generation_outputs: list[tuple[ModelConfig, GenerationOutput]],
@@ -820,89 +245,14 @@ async def _run_round_2_critique(
         )
         perspective_text = reviewer.perspective or "General expert"
 
-        instructions_text = dedent(f"""
-            {main_agent_context}
-
-            <critique_instructions type="{critique_type}">
-                <reviewer_context>
-                    <perspective>{perspective_text}</perspective>
-                    <importance_weight>{reviewer.importance}</importance_weight>
-                </reviewer_context>
-                <analysis_requirements>
-                    <requirement>DO NOT use markdown formatting - use plain text with proper spacing and newlines</requirement>
-                    <requirement>Identify specific strengths with evidence from the output</requirement>
-                    <requirement>Identify specific weaknesses with evidence from the output</requirement>
-                    <requirement>Note any missing considerations or blind spots</requirement>
-                    <requirement>Evaluate validity of stated assumptions</requirement>
-                    <requirement>Suggest concrete, actionable improvements</requirement>
-                    <requirement>Consider alternative approaches that might be better</requirement>
-                    <requirement>VERIFY factual claims: Extract key factual statements and verify each for accuracy</requirement>
-                    <requirement>For each claim, determine if accurate and provide correction if not</requirement>
-                </analysis_requirements>
-                <guidance>{final_instruction}</guidance>
-            </critique_instructions>
-        """)
-
-        expected_output_text = dedent(f"""
-            <example>
-                <is_self_critique>{str(is_self).lower()}</is_self_critique>
-                <target_model>{target_config.name}</target_model>
-                <strengths>
-                    <strength importance_or_value="0.8">
-                        <description>Clear, well-structured response with logical flow</description>
-                        <evidence>"The response starts with the main point and provides supporting details"</evidence>
-                    </strength>
-                </strengths>
-                <weaknesses>
-                    <weakness importance_or_value="0.6">
-                        <description>Missing consideration of edge cases</description>
-                        <evidence>"The response only covers the happy path scenario"</evidence>
-                    </weakness>
-                </weaknesses>
-                <missing_considerations>
-                    <consideration importance="0.7">
-                        <consideration>Performance implications not addressed</consideration>
-                        <reasoning>For production systems, performance can significantly affect user experience and cost</reasoning>
-                        <suggested_action>Add benchmarks or complexity analysis</suggested_action>
-                    </consideration>
-                </missing_considerations>
-                <flawed_assumptions>
-                    <assumption importance="0.5">
-                        <assumption>Assumes all users have admin privileges</assumption>
-                        <reasoning>Most users will have limited permissions in real environments</reasoning>
-                        <correct_understanding>Should consider role-based access control scenarios</correct_understanding>
-                    </assumption>
-                </flawed_assumptions>
-                <suggested_improvements>
-                    <improvement expected_importance="0.7">
-                        <what_to_change>Add error handling section</what_to_change>
-                        <why>Improves robustness and production readiness</why>
-                        <proposed_fix>Include try-catch blocks and validation examples</proposed_fix>
-                    </improvement>
-                </suggested_improvements>
-                <checked_claims>
-                    <claim confidence="0.9">
-                        <claim_text>Python was released in 1991</claim_text>
-                        <is_accurate>true</is_accurate>
-                    </claim>
-                    <claim confidence="0.95">
-                        <claim_text>JavaScript is the most popular language</claim_text>
-                        <is_accurate>false</is_accurate>
-                        <correction>JavaScript is one of the most popular languages, but rankings vary by metric</correction>
-                    </claim>
-                </checked_claims>
-                <accurate_claims>
-                    <claim>Python was released in 1991</claim>
-                </accurate_claims>
-                <inaccurate_claims>
-                    <claim>JavaScript is the most popular language</claim>
-                    <correction>JavaScript is one of the most popular languages, but rankings vary by metric</correction>
-                </inaccurate_claims>
-                <factual_accuracy_score>0.85</factual_accuracy_score>
-                <agreement_level>0.75</agreement_level>
-                <overall_quality_score>0.70</overall_quality_score>
-            </example>
-        """)
+        instructions_text = prompts.build_critique_instructions(
+            main_agent_context=main_agent_context,
+            critique_type=critique_type,
+            perspective_text=perspective_text,
+            importance_weight=reviewer.importance,
+            final_instruction=final_instruction,
+        )
+        expected_output_text = prompts.build_critique_example(is_self, target_config.name)
 
         agent = create_agent_with_instructions(
             description=f"Critic {reviewer.name} ({critique_type})",
@@ -913,73 +263,17 @@ async def _run_round_2_critique(
             output_schema=CritiqueFeedback,
         )
 
-        assumptions_xml = (
-            "\n".join(
-                f"            <assumption>{html.escape(a)}</assumption>"
-                for a in target_output.assumptions
-            )
-            if target_output.assumptions
-            else "            <assumption>None documented</assumption>"
+        critique_input = prompts.build_critique_target_xml(
+            target_config_name=target_config.name,
+            target_perspective=target_config.perspective or "Not specified",
+            target_importance=target_config.importance,
+            target_output=target_output.output,
+            assumptions=target_output.assumptions,
+            considered_alternatives=target_output.considered_alternatives,
+            key_insights=target_output.key_insights,
+            confidence_breakdown=target_output.confidence_breakdown,
+            html_escape_func=html.escape,
         )
-
-        alternatives_xml = (
-            "\n".join(
-                f'            <alternative potential_value="{(f"{a.potential_value:.2f}" if a.potential_value is not None else "N/A")}">\n'
-                f"                <approach>{a.approach}</approach>\n"
-                f"                <why_not_chosen>{a.why_not_chosen or 'This was chosen'}</why_not_chosen>\n"
-                f"            </alternative>"
-                for a in target_output.considered_alternatives
-            )
-            if target_output.considered_alternatives
-            else "            <alternative>None documented</alternative>"
-        )
-
-        insights_xml = (
-            "\n".join(
-                f'            <insight importance="{ki.importance:.2f}">\n'
-                f"                <text>{html.escape(ki.insight)}</text>\n"
-                + (
-                    f"                <reasoning>{html.escape(ki.reasoning)}</reasoning>\n"
-                    if ki.reasoning
-                    else ""
-                )
-                + (
-                    f"                <evidence>{html.escape(ki.evidence)}</evidence>\n"
-                    if ki.evidence
-                    else ""
-                )
-                + "            </insight>"
-                for ki in target_output.key_insights
-            )
-            if target_output.key_insights
-            else "            <insight>None documented</insight>"
-        )
-
-        target_perspective = target_config.perspective or "Not specified"
-
-        critique_input = dedent(f"""
-        <critique_target>
-            <model name="{target_config.name}" perspective="{target_perspective}" importance="{target_config.importance}" />
-            <output_to_critique>
-{target_output.output}
-            </output_to_critique>
-            <assumptions>
-{assumptions_xml}
-            </assumptions>
-            <alternatives_considered>
-{alternatives_xml}
-            </alternatives_considered>
-            <key_insights>
-{insights_xml}
-            </key_insights>
-            <confidence_breakdown>
-                <factual_accuracy>{target_output.confidence_breakdown.factual_accuracy:.2f}</factual_accuracy>
-                <completeness>{target_output.confidence_breakdown.completeness:.2f}</completeness>
-                <logical_coherence>{target_output.confidence_breakdown.logical_coherence:.2f}</logical_coherence>
-                <relevance_to_task>{target_output.confidence_breakdown.relevance_to_task:.2f}</relevance_to_task>
-            </confidence_breakdown>
-        </critique_target>
-        """)
 
         response = await agent.arun(critique_input)
         feedback = cast(CritiqueFeedback, response.content)
@@ -989,7 +283,6 @@ async def _run_round_2_critique(
 
         # Split checked_claims into accurate and inaccurate for clarity
         accurate_claims = [c for c in feedback.checked_claims if c.is_accurate]
-        inaccurate_claims = [c for c in feedback.checked_claims if not c.is_accurate]
 
         # Calculate factual accuracy from actual verified claims
         if feedback.checked_claims:
@@ -1019,43 +312,22 @@ async def _run_round_3_synthesis(
     parent_agent: Agent | Team | None = None,
     hitl: bool = False,
     hitl_max_questions: int = 5,
-) -> ConsensusSynthesis | ConsensusSynthesisWithHITL:
-    log_debug(f"Round 3: Weighted Synthesis phase{' (with HITL)' if hitl else ''}")
+) -> tuple[ConsensusSynthesis, list[HITLIteration]]:
+    log_debug("Round 3: Weighted Synthesis phase" + (" with HITL" if hitl else ""))
 
     main_agent_context = format_main_agent_context(parent_agent) if parent_agent else ""
-
     synthesis_model = max(models, key=lambda m: m.importance)
 
     output_summaries: list[str] = []
     for config, output in generation_outputs:
-        perspective = config.perspective or "Not specified"
-        insights_xml = (
-            "\n".join(
-                f'                <insight importance="{ki.importance:.2f}">\n'
-                f"                    <text>{html.escape(ki.insight)}</text>\n"
-                + (
-                    f"                    <reasoning>{html.escape(ki.reasoning)}</reasoning>\n"
-                    if ki.reasoning
-                    else ""
-                )
-                + (
-                    f"                    <evidence>{html.escape(ki.evidence)}</evidence>\n"
-                    if ki.evidence
-                    else ""
-                )
-                + "                </insight>"
-                for ki in output.key_insights
-            )
-            if output.key_insights
-            else "                <insight>None</insight>"
+        summary = prompts.build_model_output_xml(
+            config_name=config.name,
+            config_importance=config.importance,
+            perspective=config.perspective or "Not specified",
+            output=output.output,
+            key_insights=output.key_insights,
+            html_escape_func=html.escape,
         )
-        summary = dedent(f"""
-        <model_output name="{config.name}" importance="{config.importance}" perspective="{perspective}">
-            <output>{html.escape(output.output)}</output>
-            <key_insights>
-{insights_xml}
-            </key_insights>
-        </model_output>""")
         output_summaries.append(summary)
     outputs_xml = "\n".join(output_summaries)
 
@@ -1069,231 +341,73 @@ async def _run_round_3_synthesis(
     for target_name, target_critiques in critiques_by_target.items():
         critique_items: list[str] = []
         for reviewer_name, fb in target_critiques:
-            ctype = "self" if fb.is_self_critique else "peer"
-
-            strengths_xml = (
-                "\n".join(
-                    f'                    <strength importance="{s.importance:.2f}">'
-                    f"{html.escape(s.description)}</strength>"
-                    for s in fb.strengths
-                )
-                if fb.strengths
-                else "                    <strength>None identified</strength>"
+            critique_content = prompts.build_critique_feedback_xml(
+                reviewer_name=reviewer_name,
+                is_self_critique=fb.is_self_critique,
+                feedback=fb,
+                html_escape_func=html.escape,
             )
-
-            weaknesses_xml = (
-                "\n".join(
-                    f'                    <weakness importance="{w.importance:.2f}">'
-                    f"{html.escape(w.description)}</weakness>"
-                    for w in fb.weaknesses
-                )
-                if fb.weaknesses
-                else "                    <weakness>None identified</weakness>"
-            )
-
-            missing_xml = (
-                "\n".join(
-                    f'                    <missing importance="{m.importance:.2f}">'
-                    f"{html.escape(m.consideration)}</missing>"
-                    for m in fb.missing_considerations
-                )
-                if fb.missing_considerations
-                else ""
-            )
-
-            flawed_xml = (
-                "\n".join(
-                    f'                    <flawed_assumption importance="{f.importance:.2f}">'
-                    f"{html.escape(f.assumption)}</flawed_assumption>"
-                    for f in fb.flawed_assumptions
-                )
-                if fb.flawed_assumptions
-                else ""
-            )
-
-            improvements_xml = (
-                "\n".join(
-                    f'                    <improvement impact="{i.expected_impact:.2f}">'
-                    f"{html.escape(i.what_to_change)}</improvement>"
-                    for i in fb.suggested_improvements
-                )
-                if fb.suggested_improvements
-                else ""
-            )
-
-            critique_content = f"""            <critique type="{ctype}" reviewer="{reviewer_name}" quality_score="{fb.overall_quality_score:.2f}" agreement="{fb.agreement_level:.2f}">
-                <strengths>
-{strengths_xml}
-                </strengths>
-                <weaknesses>
-{weaknesses_xml}
-                </weaknesses>"""
-
-            if missing_xml:
-                critique_content += f"""
-                <missing_considerations>
-{missing_xml}
-                </missing_considerations>"""
-
-            if flawed_xml:
-                critique_content += f"""
-                <flawed_assumptions>
-{flawed_xml}
-                </flawed_assumptions>"""
-
-            if improvements_xml:
-                critique_content += f"""
-                <suggested_improvements>
-{improvements_xml}
-                </suggested_improvements>"""
-
-            critique_content += "\n            </critique>"
             critique_items.append(critique_content)
 
-        critiques_parts.append(
-            f'        <critiques_for model="{target_name}">\n'
-            + "\n".join(critique_items)
-            + "\n        </critiques_for>"
-        )
+        critiques_parts.append(prompts.build_critiques_for_wrapper_xml(target_name, critique_items))
     critiques_xml = "\n".join(critiques_parts)
 
     model_weights = {config.name: config.importance for config in models}
     total_weight = sum(model_weights.values())
     normalized_weights = {name: w / total_weight for name, w in model_weights.items()}
-    weights_xml = "\n".join(
-        f'        <model name="{name}" normalized_weight="{weight:.2%}" />'
-        for name, weight in normalized_weights.items()
+    weights_xml = prompts.build_model_weights_xml(normalized_weights)
+
+    synthesis = await _run_single_synthesis(
+        synthesis_model=synthesis_model,
+        main_agent_context=main_agent_context,
+        weights_xml=weights_xml,
+        user_input=user_input,
+        outputs_xml=outputs_xml,
+        critiques_xml=critiques_xml,
+        debug_mode=debug_mode,
     )
+    synthesis.model_contribution_weights = normalized_weights
 
-    # Build HITL instructions if enabled
-    hitl_instructions = ""
+    hitl_iterations: list[HITLIteration] = []
     if hitl:
-        hitl_instructions = dedent(f"""
-            <hitl_questionnaire_instructions>
-                <task>Additionally, generate a questionnaire for human-in-the-loop feedback.</task>
-                <requirements>
-                    <requirement>ONLY generate questions if there are genuine uncertainties that user input can resolve</requirement>
-                    <requirement>If synthesis confidence is high (>90%) and no significant uncertainties, set hitl_questionnaire to null or leave questions empty</requirement>
-                    <requirement>Maximum {hitl_max_questions} questions</requirement>
-                    <requirement>Each question should have clear, actionable options derived from the uncertainties</requirement>
-                    <requirement>DO NOT fabricate questions - only ask about real uncertainties</requirement>
-                </requirements>
-            </hitl_questionnaire_instructions>
-        """)
+        synthesis, hitl_iterations = await _run_synthesis_hitl_loop(
+            models=models,
+            synthesis=synthesis,
+            synthesis_model=synthesis_model,
+            main_agent_context=main_agent_context,
+            weights_xml=weights_xml,
+            user_input=user_input,
+            outputs_xml=outputs_xml,
+            critiques_xml=critiques_xml,
+            debug_mode=debug_mode,
+            hitl_max_questions=hitl_max_questions,
+            normalized_weights=normalized_weights,
+        )
 
-    instructions_text = dedent(f"""
-        {main_agent_context}
+    return synthesis, hitl_iterations
 
-        <synthesis_instructions>
-            <task>Synthesize multiple model outputs into a final consensus.</task>
-            <model_weights>
-{weights_xml}
-            </model_weights>
-            <requirements>
-                <requirement>DO NOT use markdown formatting - use plain text with proper spacing and newlines</requirement>
-                <requirement>Analyze all outputs and critiques thoroughly</requirement>
-                <requirement>Weight contributions by model importance</requirement>
-                <requirement>Resolve conflicts considering importance, critique feedback, and self-critique admissions</requirement>
-                <requirement>Incorporate best insights from all models</requirement>
-                <requirement>Document rejected approaches with reasons</requirement>
-                <requirement>Identify areas of strong agreement vs remaining uncertainty</requirement>
-            </requirements>
-            <goal>Create a synthesis that is BETTER than any individual output.</goal>
-        </synthesis_instructions>
-        {hitl_instructions}
-    """)
 
-    # Build expected output with HITL example if enabled
-    hitl_example = ""
-    if hitl:
-        hitl_example = """
-            <hitl_questionnaire>
-                <questions>
-                    <question>
-                        <question_id>framework_preference</question_id>
-                        <question_text>Which framework consideration is most important for your project?</question_text>
-                        <options>
-                            <option option_id="a" label="Enterprise readiness" description="Large team, long-term maintenance"/>
-                            <option option_id="b" label="Simplicity" description="Quick development, easy onboarding"/>
-                            <option option_id="c" label="Performance" description="Speed and bundle size critical"/>
-                        </options>
-                        <category>uncertainty</category>
-                        <allows_multiple>false</allows_multiple>
-                        <related_uncertainty>Best framework choice (React vs Vue vs Svelte)</related_uncertainty>
-                    </question>
-                </questions>
-                <context_summary>Models agree on JavaScript/TypeScript but differ on framework choice.</context_summary>
-                <synthesis_confidence>0.85</synthesis_confidence>
-                <should_skip_hitl>false</should_skip_hitl>
-            </hitl_questionnaire>"""
+async def _run_single_synthesis(
+    synthesis_model: ModelConfig,
+    main_agent_context: str,
+    weights_xml: str,
+    user_input: str,
+    outputs_xml: str,
+    critiques_xml: str,
+    debug_mode: DebugMode,
+    hitl_feedback: str | None = None,
+    hitl_toolkit: ConsensusHITLToolkit | None = None,
+) -> ConsensusSynthesis:
+    instructions_text = prompts.build_synthesis_instructions(
+        main_agent_context=main_agent_context,
+        weights_xml=weights_xml,
+        hitl_feedback=hitl_feedback,
+    )
+    expected_output_text = prompts.build_synthesis_example()
 
-    hitl_no_questions_example = ""
-    if hitl:
-        hitl_no_questions_example = """
-        <example_no_uncertainties task="What is 2+2?">
-            <synthesized_output>The answer is 4.</synthesized_output>
-            <synthesis_approach>Direct mathematical calculation</synthesis_approach>
-            <consensus_confidence>1.0</consensus_confidence>
-            <areas_of_uncertainty></areas_of_uncertainty>
-            <hitl_questionnaire>
-                <questions></questions>
-                <context_summary>Complete agreement, no uncertainties.</context_summary>
-                <synthesis_confidence>1.0</synthesis_confidence>
-                <should_skip_hitl>true</should_skip_hitl>
-            </hitl_questionnaire>
-        </example_no_uncertainties>"""
-
-    expected_output_text = dedent(f"""
-        <example task="Best programming language for web development">
-            <synthesized_output>
-                JavaScript/TypeScript is the recommended choice for web development due to its
-                universal browser support, rich ecosystem, and full-stack capabilities with Node.js.
-                For type safety and larger projects, TypeScript adds significant value.
-            </synthesized_output>
-            <synthesis_approach>Weighted combination prioritizing practical applicability</synthesis_approach>
-            <incorporated_insights>
-                <insight from_model="ModelA" weight_applied="0.4" how_used="Adopted TypeScript recommendation for type safety"/>
-                <insight from_model="ModelB" weight_applied="0.35" how_used="Incorporated ecosystem analysis"/>
-            </incorporated_insights>
-            <conflict_resolutions>
-                <resolution topic="TypeScript vs JavaScript">
-                    <conflicting_positions>
-                        <position model="ModelA">TypeScript always</position>
-                        <position model="ModelB">JavaScript for simplicity</position>
-                    </conflicting_positions>
-                    <resolution>TypeScript for larger projects, JavaScript acceptable for prototypes</resolution>
-                    <winning_model>ModelA</winning_model>
-                </resolution>
-            </conflict_resolutions>
-            <rejected_approaches>
-                <rejected from_model="ModelC" approach="Use WebAssembly exclusively" rejection_reason="Limited browser API access and steeper learning curve"/>
-            </rejected_approaches>
-            <consensus_confidence>0.85</consensus_confidence>
-            <areas_of_strong_agreement>
-                <agreement confidence="0.95">
-                    <point>JavaScript ecosystem maturity</point>
-                    <reasoning>All models cited npm package availability and community size as key factors</reasoning>
-                    <supporting_models>ModelA, ModelB, ModelC</supporting_models>
-                </agreement>
-                <agreement confidence="0.90">
-                    <point>Full-stack capability importance</point>
-                    <reasoning>Models agreed that using one language across stack reduces complexity</reasoning>
-                    <supporting_models>ModelA, ModelB</supporting_models>
-                </agreement>
-            </areas_of_strong_agreement>
-            <areas_of_uncertainty>
-                <uncertainty importance="0.6">
-                    <area>Best framework choice (React vs Vue vs Svelte)</area>
-                    <reasoning>Models provided conflicting recommendations based on different criteria</reasoning>
-                    <potential_resolution>Context-dependent: React for enterprise, Vue for simplicity, Svelte for performance</potential_resolution>
-                </uncertainty>
-            </areas_of_uncertainty>{hitl_example}
-        </example>
-        {hitl_no_questions_example}
-    """)
-
-    # Use combined schema when HITL is enabled
-    output_schema = ConsensusSynthesisWithHITL if hitl else ConsensusSynthesis
+    tools: list[Any] = []
+    if hitl_toolkit is not None:
+        tools.append(hitl_toolkit)
 
     agent = create_agent_with_instructions(
         description="Consensus Synthesizer",
@@ -1301,34 +415,177 @@ async def _run_round_3_synthesis(
         expected_output=expected_output_text,
         model=synthesis_model.model,
         debug_mode=debug_mode,
-        output_schema=output_schema,
+        output_schema=ConsensusSynthesis,
+        tools=tools if tools else None,
     )
 
-    synthesis_input = dedent(f"""
-    <synthesis_context>
-        <original_task>{user_input}</original_task>
-        <model_outputs>
-{outputs_xml}
-        </model_outputs>
-        <critiques>
-{critiques_xml}
-        </critiques>
-    </synthesis_context>
-    """)
+    synthesis_input = prompts.build_synthesis_context_xml(user_input, outputs_xml, critiques_xml)
 
     response = await agent.arun(synthesis_input)
 
-    if hitl:
-        synthesis = cast(ConsensusSynthesisWithHITL, response.content)
-    else:
-        synthesis = cast(ConsensusSynthesis, response.content)
-
-    synthesis.model_contribution_weights = normalized_weights
-
-    assert synthesis is not None and isinstance(
-        synthesis, (ConsensusSynthesis, ConsensusSynthesisWithHITL)
-    ), "Synthesis parsing failed"
+    synthesis = cast(ConsensusSynthesis, response.content)
+    assert synthesis is not None and isinstance(synthesis, ConsensusSynthesis), (
+        "Synthesis parsing failed"
+    )
     return synthesis
+
+
+async def _run_synthesis_hitl_loop(
+    models: list[ModelConfig],
+    synthesis: ConsensusSynthesis,
+    synthesis_model: ModelConfig,
+    main_agent_context: str,
+    weights_xml: str,
+    user_input: str,
+    outputs_xml: str,
+    critiques_xml: str,
+    debug_mode: DebugMode,
+    hitl_max_questions: int,
+    normalized_weights: dict[str, float],
+    max_hitl_iterations: int = 3,
+) -> tuple[ConsensusSynthesis, list[HITLIteration]]:
+    log_debug("Starting HITL loop for synthesis refinement")
+
+    hitl_toolkit = ConsensusHITLToolkit()
+    current_synthesis = synthesis
+    hitl_iterations: list[HITLIteration] = []
+
+    for iteration in range(1, max_hitl_iterations + 1):
+        log_debug(f"HITL iteration {iteration}/{max_hitl_iterations}")
+
+        confidence_before = current_synthesis.consensus_confidence
+
+        questionnaire = await _generate_hitl_questionnaire_from_synthesis(
+            models=models,
+            synthesis=current_synthesis,
+            user_input=user_input,
+            debug_mode=debug_mode,
+            hitl_max_questions=hitl_max_questions,
+        )
+
+        if questionnaire.should_skip_hitl or not questionnaire.questions:
+            log_debug("HITL: no meaningful questions, exiting loop")
+            break
+
+        log_debug(f"HITL: generated {len(questionnaire.questions)} questions")
+
+        hitl_feedback = prompts.build_hitl_feedback_context_xml(questionnaire)
+
+        previous_synthesis = current_synthesis
+        current_synthesis = await _run_single_synthesis(
+            synthesis_model=synthesis_model,
+            main_agent_context=main_agent_context,
+            weights_xml=weights_xml,
+            user_input=user_input,
+            outputs_xml=outputs_xml,
+            critiques_xml=critiques_xml,
+            debug_mode=debug_mode,
+            hitl_feedback=hitl_feedback,
+            hitl_toolkit=hitl_toolkit,
+        )
+        current_synthesis.model_contribution_weights = normalized_weights
+
+        hitl_iteration = HITLIteration(
+            iteration=iteration,
+            questionnaire=questionnaire,
+            user_answers=[],  # TODO: Capture actual user answers from toolkit
+            synthesis_before_confidence=confidence_before,
+            synthesis_after_confidence=current_synthesis.consensus_confidence,
+            synthesis_output_after=current_synthesis.synthesized_output,
+        )
+        hitl_iterations.append(hitl_iteration)
+
+        if current_synthesis.consensus_confidence >= 0.9:
+            log_debug(
+                f"HITL: confidence {current_synthesis.consensus_confidence:.0%} >= 90%, exiting loop"
+            )
+            break
+
+    return current_synthesis, hitl_iterations
+
+
+async def _generate_hitl_questionnaire_from_synthesis(
+    models: list[ModelConfig],
+    synthesis: ConsensusSynthesis,
+    user_input: str,
+    debug_mode: DebugMode,
+    hitl_max_questions: int = 5,
+) -> HITLQuestionnaire:
+    """Generate HITL questionnaire from synthesis uncertainties.
+
+    This function is called during Judge & Refine phase when HITL is enabled.
+    It generates questions based on the areas_of_uncertainty in the synthesis.
+    """
+    log_debug("Generating HITL questionnaire from synthesis uncertainties")
+
+    synthesis_model_config = max(models, key=lambda m: m.importance)
+
+    # Build XML context for questionnaire generation
+    uncertainties_xml = (
+        "\n".join(
+            [
+                f'        <uncertainty importance="{u.importance:.2f}" area="{u.area}" reasoning="{u.reasoning}" />'
+                for u in synthesis.areas_of_uncertainty
+            ]
+        )
+        if synthesis.areas_of_uncertainty
+        else "        <uncertainty>No uncertainties identified</uncertainty>"
+    )
+
+    instructions_text = f"""
+<hitl_questionnaire_generation_instructions>
+    <task>Generate a human-in-the-loop questionnaire based on consensus uncertainties.</task>
+    <synthesis_context>
+        <synthesis_output>{html.escape(synthesis.synthesized_output)}</synthesis_output>
+        <synthesis_confidence>{synthesis.consensus_confidence:.2f}</synthesis_confidence>
+        <areas_of_uncertainty>
+{uncertainties_xml}
+        </areas_of_uncertainty>
+    </synthesis_context>
+    <thinking_process>
+        Before generating questions, you MUST use <thinking> tags to analyze:
+        1. Review the synthesis confidence level - is it high enough to skip HITL?
+        2. Examine each area of uncertainty - can user input genuinely resolve it?
+        3. Prioritize uncertainties by importance - which matter most for the output quality?
+        4. Consider what specific information from the user would be most valuable
+        5. Plan clear, actionable questions with well-defined options
+    </thinking_process>
+    <requirements>
+        <requirement>ALWAYS use <thinking> tags before generating questions to show your analysis</requirement>
+        <requirement>ONLY generate questions if there are genuine uncertainties that user input can resolve</requirement>
+        <requirement>If synthesis confidence is high (>90%) and no significant uncertainties, set should_skip_hitl to true</requirement>
+        <requirement>Maximum {hitl_max_questions} questions</requirement>
+        <requirement>Each question should have clear, actionable options derived from the uncertainties</requirement>
+        <requirement>DO NOT fabricate questions - only ask about real uncertainties</requirement>
+    </requirements>
+    <output_format>
+        <thinking>
+        [Your analysis of whether HITL is needed and what questions would be valuable]
+        </thinking>
+
+        [Your questionnaire output - or set should_skip_hitl to true if not needed]
+    </output_format>
+</hitl_questionnaire_generation_instructions>
+"""
+
+    expected_output_text = prompts.build_synthesis_example()
+
+    agent = create_agent_with_instructions(
+        description="HITL Questionnaire Generator",
+        instructions=instructions_text,
+        expected_output=expected_output_text,
+        model=synthesis_model_config.model,
+        debug_mode=debug_mode,
+        output_schema=HITLQuestionnaire,
+    )
+
+    response = await agent.arun(user_input)
+    questionnaire = cast(HITLQuestionnaire, response.content)
+
+    assert questionnaire is not None and isinstance(questionnaire, HITLQuestionnaire), (
+        "Questionnaire generation failed"
+    )
+    return questionnaire
 
 
 async def _run_round_4_judge_and_refine(
@@ -1367,7 +624,7 @@ async def _run_round_4_judge_and_refine(
             )
 
             result: AgentAsJudgeResult | None = eval_instance.run(
-                input=user_input, output=current_output, print_results=False
+                input=user_input, output=current_output, print_results=debug_mode or False
             )
 
             assert result is not None and result.results, "AgentAsJudgeEval returned no results"
@@ -1425,79 +682,13 @@ async def _run_round_4_judge_and_refine(
             log_debug(f"Refining output (iteration {iteration})")
 
             failed_criteria = [v for v in verdicts if not v.passed]
-            issues_xml = "\n".join(
-                f'            <failed_criterion name="{v.criterion_name}" score="{(f"{v.score:.2f}" if v.score is not None else "N/A")}">\n'
-                f"                <reasoning>{v.reasoning}</reasoning>\n"
-                f"            </failed_criterion>"
-                for v in failed_criteria
+            issues_xml = prompts.build_failed_criteria_xml(failed_criteria)
+
+            instructions_text = prompts.build_refinement_instructions(
+                main_agent_context=main_agent_context,
+                failed_criteria_xml=issues_xml,
             )
-
-            instructions_text = dedent(f"""
-                {main_agent_context}
-
-                <refinement_instructions>
-                    <task>Refine consensus output to address failed quality criteria.</task>
-                    <failed_criteria>
-{issues_xml}
-                    </failed_criteria>
-                    <requirements>
-                        <requirement>DO NOT use markdown formatting - use plain text with proper spacing and newlines</requirement>
-                        <requirement>Maintain all key insights from original output</requirement>
-                        <requirement>Focus specifically on fixing the identified issues</requirement>
-                        <requirement>Preserve overall structure and flow</requirement>
-                        <requirement>Be honest about which issues you can and cannot address</requirement>
-                    </requirements>
-                    <output_format>
-                        You must return a structured output that includes:
-                        1. refined_output: The improved text
-                        2. issues_addressed: List of issues you successfully fixed with explanation
-                        3. issues_not_addressed: List of issues you could not fix with explanation
-                        4. additional_improvements: Any other improvements you made
-                    </output_format>
-                </refinement_instructions>
-            """)
-
-            expected_output_text = dedent("""
-                <description>
-                    Return a structured refinement result that includes:
-                    - The refined output text (improved version)
-                    - For each issue that WAS addressed: explain how and what changes were made
-                    - For each issue that was NOT addressed: explain why (e.g., insufficient info, trade-offs)
-                    - Any other improvements made beyond the specific criteria
-
-                    Be honest about limitations. Not all issues can be addressed in refinement.
-                </description>
-                <example>
-                    <failed_criteria>
-                        <criterion name="Completeness" score="0.5" reasoning="Lacks specific examples"/>
-                        <criterion name="Accuracy" score="0.4" reasoning="Contains outdated information"/>
-                    </failed_criteria>
-                    <refinement_result>
-                        <refined_output>Python is ideal for beginners due to its readable syntax that
-                        resembles English, extensive documentation and tutorials, active community
-                        support, and versatile applications from web development to data science.</refined_output>
-                        <issues_addressed>
-                            <issue>
-                                <criterion_name>Completeness</criterion_name>
-                                <original_issue>Lacks specific examples</original_issue>
-                                <how_fixed>Added specific examples like documentation, community support, and applications</how_fixed>
-                                <changes_made>Expanded from 6 words to 30+ words with concrete examples</changes_made>
-                            </issue>
-                        </issues_addressed>
-                        <issues_not_addressed>
-                            <issue>
-                                <criterion_name>Accuracy</criterion_name>
-                                <original_issue>Contains outdated information</original_issue>
-                                <why_not_addressed>Cannot verify current information without external sources</why_not_addressed>
-                                <suggested_alternative>Consult official Python documentation for latest version details</suggested_alternative>
-                            </issue>
-                        </issues_not_addressed>
-                        <additional_improvements>
-                            <improvement>Improved sentence flow and readability</improvement>
-                        </additional_improvements>
-                    </refinement_result>
-                </example>
-            """)
+            expected_output_text = prompts.build_refinement_example()
 
             refine_agent = create_agent_with_instructions(
                 description="Consensus Refiner",
@@ -1508,13 +699,7 @@ async def _run_round_4_judge_and_refine(
                 output_schema=RefinementResult,
             )
 
-            refine_input = dedent(f"""
-            <refinement_context>
-                <original_output>
-                    {current_output}
-                </original_output>
-            </refinement_context>
-            """)
+            refine_input = prompts.build_refinement_context_xml(current_output)
             refine_response = await refine_agent.arun(refine_input)
             refinement_result = cast(RefinementResult, refine_response.content)
 
@@ -1593,6 +778,7 @@ def _assemble_consensus_result(
     synthesis: ConsensusSynthesis,
     judge_results: list[JudgeResult],
     judge_criteria: list[JudgeCriteria] | None = None,
+    hitl_iterations: list[HITLIteration] | None = None,
 ) -> ConsensusResult:
     model_contributions: list[ModelContribution] = []
     raw_generation_outputs: list[GenerationOutputSummary] = []
@@ -1662,7 +848,7 @@ def _assemble_consensus_result(
     )
     critique_summary = f"{len(critiques)} critiques ({self_critiques} self, {peer_critiques} peer). Avg quality: {avg_quality:.2f}."
 
-    synthesis_summary = f"Approach: {synthesis.synthesis_approach[:80]}. Insights: {len(synthesis.incorporated_insights)}, Conflicts: {len(synthesis.conflict_resolutions)}."
+    synthesis_summary = f"Approach: {synthesis.synthesis_approach}. Insights: {len(synthesis.incorporated_insights)}, Conflicts: {len(synthesis.conflict_resolutions)}."
 
     judge_summary = f"{refinement_iterations} iteration(s). Score: {judge_score:.2f}."
 
@@ -1688,148 +874,12 @@ def _assemble_consensus_result(
         rejected_approaches=synthesis.rejected_approaches,
         synthesis_approach=synthesis.synthesis_approach,
         judge_criteria_used=judge_criteria or [],
+        hitl_iterations=hitl_iterations or [],
     )
 
 
 def _inject_consensus_result(run_input: RunInput, consensus_result: ConsensusResult) -> None:
-    contributions_xml = "\n".join(
-        f'        <model name="{mc.model_name}" importance="{(f"{mc.importance:.0%}" if mc.importance is not None else "N/A")}" insights_incorporated="{mc.insights_incorporated}" insights_rejected="{mc.insights_rejected}">\n'
-        f"            <perspective>{mc.perspective or 'General'}</perspective>\n"
-        f"            <key_contributions>{', '.join(c.contribution for c in mc.key_contributions) if mc.key_contributions else 'None'}</key_contributions>\n"
-        f"        </model>"
-        for mc in consensus_result.model_contributions
-    )
-
-    agreements_xml = (
-        "\n".join(
-            f'        <agreement confidence="{(f"{a.confidence:.0%}" if a.confidence is not None else "N/A")}">\n'
-            f"            <point>{a.point}</point>\n"
-            f"            <reasoning>{a.reasoning}</reasoning>\n"
-            f"        </agreement>"
-            for a in consensus_result.key_agreements
-        )
-        if consensus_result.key_agreements
-        else "        <agreement>None</agreement>"
-    )
-
-    conflicts_xml = (
-        "\n".join(
-            f'        <conflict topic="{cr.topic}">\n'
-            f"            <resolution>{cr.resolution}</resolution>\n"
-            f"            <rationale>{cr.resolution_rationale}</rationale>\n"
-            f"        </conflict>"
-            for cr in consensus_result.resolved_conflicts
-        )
-        if consensus_result.resolved_conflicts
-        else "        <conflict>None</conflict>"
-    )
-
-    uncertainties_xml = (
-        "\n".join(
-            f'        <uncertainty importance="{(f"{u.importance:.0%}" if u.importance is not None else "N/A")}">\n'
-            f"            <area>{u.area}</area>\n"
-            f"            <reasoning>{u.reasoning}</reasoning>\n"
-            f"        </uncertainty>"
-            for u in consensus_result.remaining_uncertainties
-        )
-        if consensus_result.remaining_uncertainties
-        else "        <uncertainty>None</uncertainty>"
-    )
-
-    judge_iterations_parts: list[str] = []
-    for jr in consensus_result.judge_results:
-        verdicts_xml = "\n".join(
-            f'                <verdict criterion="{v.criterion_name}" score="{(f"{v.score:.2f}" if v.score is not None else "N/A")}" passed="{v.passed}">\n'
-            f"                    <reasoning>{v.reasoning}</reasoning>\n"
-            + (
-                f"                    <issues>{', '.join(si.issue for si in v.specific_issues)}</issues>\n"
-                if v.specific_issues
-                else ""
-            )
-            + "                </verdict>"
-            for v in jr.verdicts
-        )
-        refinements_xml = (
-            "\n".join(
-                f'                <action criterion="{ra.criterion_name}" was_addressed="{str(ra.was_addressed).lower()}" importance="{(f"{ra.importance:.2f}" if ra.importance is not None else "N/A")}">\n'
-                f"                    <issue>{ra.issue_description}</issue>\n"
-                + (
-                    f"                    <reasoning>{ra.reasoning}</reasoning>\n"
-                    if ra.reasoning
-                    else ""
-                )
-                + (
-                    f"                    <changes_made>{ra.changes_made}</changes_made>\n"
-                    if ra.changes_made
-                    else ""
-                )
-                + "                </action>"
-                for ra in jr.refinement_actions
-            )
-            if jr.refinement_actions
-            else "                <action>None</action>"
-        )
-        judge_iterations_parts.append(
-            f'            <iteration number="{jr.iteration}" overall_score="{(f"{jr.overall_score:.2f}" if jr.overall_score is not None else "N/A")}" passed="{jr.passed}">\n'
-            f"                <verdicts>\n{verdicts_xml}\n                </verdicts>\n"
-            f"                <refinement_actions>\n{refinements_xml}\n                </refinement_actions>\n"
-            + (
-                f"                <refined_output>{html.escape(jr.refined_output)}</refined_output>\n"
-                if jr.refined_output
-                else ""
-            )
-            + "            </iteration>"
-        )
-    judge_results_xml = (
-        "\n".join(judge_iterations_parts)
-        if judge_iterations_parts
-        else "            <iteration>None</iteration>"
-    )
-
-    formatted_result = dedent(f"""
-    <multi_model_consensus confidence="{consensus_result.consensus_confidence:.2%}" judge_score="{consensus_result.judge_score:.2%}" iterations="{consensus_result.refinement_iterations}">
-        <consensus_explanation>
-            This is a MULTI-MODEL CONSENSUS result. Before you received this task, multiple AI models
-            with different perspectives independently analyzed it. Their outputs were:
-            1. GENERATED independently by each model
-            2. CRITIQUED by all models (self-critique + peer critique)
-            3. SYNTHESIZED into a unified answer, weighting each model's importance
-            4. JUDGED and refined until quality thresholds were met
-
-            HOW TO USE THIS:
-            - The final_output represents the AGREED-UPON answer from all models
-            - Key agreements show where all models strongly aligned
-            - Resolved conflicts show disagreements that were worked through
-            - Remaining uncertainties are areas where models couldn't fully agree
-            - Use this consensus as authoritative pre-analyzed context for your response
-            - Build upon the consensus rather than contradicting it unless you have strong reason
-        </consensus_explanation>
-        <final_output>
-{consensus_result.final_output}
-        </final_output>
-        <model_contributions>
-{contributions_xml}
-        </model_contributions>
-        <key_agreements>
-{agreements_xml}
-        </key_agreements>
-        <resolved_conflicts>
-{conflicts_xml}
-        </resolved_conflicts>
-        <remaining_uncertainties>
-{uncertainties_xml}
-        </remaining_uncertainties>
-        <judge_evaluation_details>
-{judge_results_xml}
-        </judge_evaluation_details>
-        <process_summary>
-            <generation>{consensus_result.generation_summary}</generation>
-            <critique>{consensus_result.critique_summary}</critique>
-            <synthesis>{consensus_result.synthesis_summary}</synthesis>
-            <judge>{consensus_result.judge_summary}</judge>
-        </process_summary>
-    </multi_model_consensus>
-    """)
+    formatted_result = prompts.build_consensus_result_xml(consensus_result, html.escape)
 
     inject_context_to_run_input(
         run_input=run_input, context_content=formatted_result, message_role="system", prepend=True
@@ -1875,14 +925,9 @@ def _create_consensus_hook(
                     f"{triage_decision.reason}"
                 )
                 # Inject a note that consensus was skipped
-                skip_note = dedent(f"""
-                <consensus_skipped>
-                    <reason>{triage_decision.reason}</reason>
-                    <category>{triage_decision.category}</category>
-                    <note>This request does not require multi-model consensus research.
-                    Respond directly without the overhead of full consensus analysis.</note>
-                </consensus_skipped>
-                """)
+                skip_note = prompts.build_consensus_skipped_xml(
+                    triage_decision.reason, triage_decision.category
+                )
                 inject_context_to_run_input(
                     run_input=run_input,
                     context_content=skip_note,
@@ -1910,87 +955,17 @@ def _create_consensus_hook(
             agent,
         )
 
-        # Run synthesis - includes HITL questionnaire generation in single call if hitl=True
-        synthesis = await _run_round_3_synthesis(
+        synthesis, hitl_iterations = await _run_round_3_synthesis(
             models,
             generation_outputs,
             critiques,
             user_input,
             debug_mode,
             agent,
-            hitl=hitl,
-            hitl_max_questions=hitl_max_questions,
+            hitl,
+            hitl_max_questions,
         )
 
-        # HITL mode: check if questionnaire was generated and inject toolkit
-        if hitl and isinstance(synthesis, ConsensusSynthesisWithHITL):
-            questionnaire = synthesis.hitl_questionnaire
-
-            # Skip HITL if no meaningful questions to ask
-            if (
-                questionnaire is None
-                or questionnaire.should_skip_hitl
-                or not questionnaire.questions
-            ):
-                log_debug(
-                    "HITL skipped: no uncertainties or meaningful questions to ask. "
-                    "Proceeding with standard Judge & Refine."
-                )
-                # Fall through to standard mode below
-            else:
-                log_debug(
-                    f"HITL mode: injecting toolkit with {len(questionnaire.questions)} questions"
-                )
-
-                # Build refinement kwargs for the toolkit (passed as function args)
-                refinement_kwargs: dict[str, Any] = {
-                    "models": models,
-                    "synthesis": synthesis,
-                    "user_input": user_input,
-                    "judge_criteria": judge_criteria,
-                    "max_iterations": max_refinement_iterations,
-                    "judge_threshold": judge_threshold,
-                    "debug_mode": debug_mode,
-                    "parent_agent": agent,
-                }
-
-                # Create and add the HITL toolkit to the agent
-                # Pass refinement function to avoid cyclic import
-                hitl_toolkit = ConsensusHITLToolkit(
-                    questionnaire=questionnaire,
-                    synthesis=synthesis,
-                    refinement_func=_run_round_4_judge_and_refine,
-                    refinement_kwargs=refinement_kwargs,
-                )
-
-                # Dynamically add the toolkit to the agent
-                if isinstance(agent, Agent):
-                    agent.add_tool(hitl_toolkit)
-                    log_debug(
-                        f"Added ConsensusHITLToolkit with {len(questionnaire.questions)} questions"
-                    )
-
-                # Inject consensus result without running Judge & Refine
-                # The toolkit's run_refinement_with_feedback() will handle that
-                consensus_result = _assemble_consensus_result(
-                    user_input,
-                    synthesis.synthesized_output,  # Use synthesis output directly
-                    judge_score=0.0,
-                    refinement_iterations=0,
-                    generation_outputs=generation_outputs,
-                    critiques=critiques,
-                    synthesis=synthesis,
-                    judge_results=[],
-                    judge_criteria=judge_criteria,
-                )
-
-                log_debug(
-                    f"HITL Consensus pre-synthesis complete: confidence={consensus_result.consensus_confidence:.2%}"
-                )
-                _inject_consensus_result(run_input, consensus_result)
-                return
-
-        # Standard mode: run Judge & Refine phase
         (
             final_output,
             judge_score,
@@ -2017,6 +992,7 @@ def _create_consensus_hook(
             synthesis,
             judge_results,
             judge_criteria,
+            hitl_iterations,
         )
 
         log_debug(
@@ -2025,8 +1001,6 @@ def _create_consensus_hook(
         _inject_consensus_result(run_input, consensus_result)
 
         if auto_save_html and output_directory:
-            import datetime
-
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"consensus_report_{timestamp}.html"
             output_path = output_directory / filename

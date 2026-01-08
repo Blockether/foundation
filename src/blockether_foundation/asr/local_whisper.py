@@ -59,7 +59,6 @@ class LocalWhisperAudioTranscriber:
         whisper_model: WhisperModelName = "turbo",
         device: str = "cpu",
         hf_token: str | None = None,
-        enable_diarization: bool = False,
     ) -> None:
         """Pre-download Whisper models to the specified directory.
 
@@ -68,7 +67,6 @@ class LocalWhisperAudioTranscriber:
             whisper_model: The Whisper model to download.
             device: Device to use for model initialization ('cpu' or 'cuda').
             hf_token: HuggingFace auth token (unused with faster-whisper).
-            enable_diarization: Diarization not supported in this implementation.
 
         Raises:
             ImportError: If faster-whisper is not installed.

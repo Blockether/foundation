@@ -1,5 +1,5 @@
 <h2 align="center">
-  <img width="35%" alt="Library logo" src="logo/logo.png"><br/>
+  <img width="35%" alt="Blockether Foundation" src="docs/logo/logo.png"><br/>
 </h2>
 
 <div align="center">
@@ -26,7 +26,6 @@
 </h3>
 </div>
 
-
 ## 🧪 Development
 
 ```bash
@@ -43,22 +42,6 @@ uv pip install -e ".[dev]"
 poe check-all  # Run all tests and quality checks
 ```
 
-## 🤝 Contributing
+## License
 
-We welcome contributions! Please read our [Contributing Guide](CONTRIBUTING.md) for details on:
-
-- Code style and standards
-- Pull request process
-- Testing requirements
-- Issue reporting
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) for details.
-
-## 🔗 Links
-
-- [Documentation](https://blockether.github.io/blockether-foundation/)
-- [Issues](https://github.com/blockether/blockether-foundation/issues)
-- [Discussions](https://github.com/blockether/blockether-foundation/discussions)
-- [Agno Framework](https://github.com/agno-ai/agno)
+[MIT LICENSE](LICENSE)

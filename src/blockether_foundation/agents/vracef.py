@@ -1,682 +1,44 @@
-"""V-RACEF Framework Enforcer Agent and Prompt Optimizer.
+"""V-RACEF Framework Orchestrator.
 
 Evaluates agent responses against V-RACEF (Verification, Reasoning, Assessment, Context, Execution, Feedback)
-framework and provides structured feedback with scoring, improvement priorities, and recommendations.
+framework using specialized coordinated agents.
 
 The V (Verification) phase implements Chain of Verification (CoVe) methodology from Meta AI research
 (arXiv:2309.11495) to fact-check claims and reduce hallucinations before reasoning begins.
-
-VRacefPromptOptimizer uses V-RACEF evaluations to iteratively improve agent prompts (instructions,
-description, expected_output) while ensuring no regressions on existing test cases.
 """
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses as dc
 import json
-import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from textwrap import dedent
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from agno.agent import Agent
 from agno.eval.accuracy import AccuracyEval, AccuracyResult
 from agno.models.base import Model
-from numpy import test
+from agno.utils.log import (
+    log_debug,  # type: ignore
+    log_error,  # type: ignore
+    log_exception,  # type: ignore
+    log_info,  # type: ignore
+    log_warning,  # type: ignore
+)
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.panel import Panel
 
-from ..models import BaseModelSerializable, ChainOfThoughts
+from ..models import ChainOfThoughts
 from ..utils import dataclass_copy
 
-logger = logging.getLogger(__name__)
-
 if TYPE_CHECKING:
-    from agno.agent import Agent
-    from agno.models.base import Model
-
     from .hooks.consensus.core import ConsensusHooksConfig
-
-
-VRACEF_ENFORCER = Agent(
-    id="vracef-enforcer",
-    name="V-RACEF Enforcer Agent",
-    instructions="""
-<vracef_enforcer_agent>
-  <identity>
-    <role>V-RACEF Framework Enforcer Agent</role>
-    <description>
-      You evaluate and enforce V-RACEF (Verification, Reasoning, Assessment, Context, Execution, Feedback)
-      framework compliance on other agents. Your role is to provide structured, detailed feedback
-      across all six V-RACEF phases with specific scores (0.0-1.0), actionable improvement
-      suggestions, and prioritized recommendations for both agents and prompt engineers.
-
-      V-RACEF PHASES:
-      - V - Verification: Fact-check claims using Chain of Verification (CoVe) methodology
-      - R - Reasoning: Clear, logical step-by-step thinking with explicit assumptions
-      - A - Assessment: Self-evaluation with confidence breakdown and uncertainty analysis
-      - C - Context: Understanding environment, constraints, patterns, and codebase conventions
-      - E - Execution: Implementation with proper structure, error handling, and validation
-      - F - Feedback: Learning from results with explanations and next steps
-
-      YOUR CAPABILITIES:
-      - Evaluates agent responses across all 6 V-RACEF phases with weighted criteria
-      - Adapts evaluation based on task complexity (simple: 0.65, moderate: 0.75, complex: 0.80)
-      - Provides agent-type-specific criteria (frontend, backend, codebase analysis)
-      - Identifies critical failures that must be addressed (scores below 0.30)
-      - Generates prioritized improvement recommendations
-      - Offers positive reinforcement for strengths and suggests how to leverage them
-      - Makes specific recommendations for prompt engineers to improve agent system prompts
-    </description>
-    <purpose>
-      Ensure consistent, high-quality agent outputs by enforcing V-RACEF framework principles
-      through structured evaluation and feedback. This improves overall agent reliability,
-      verifiability, and effectiveness by adding explicit verification of factual claims.
-    </purpose>
-    <core_philosophy>
-      V-RACEF extends RACEF with Chain of Verification (CoVe) from Meta AI (arXiv:2309.11495):
-      <phase>V - Verification: Extract claims, generate verification questions, answer independently, correct errors</phase>
-      <phase>R - Reasoning: Clear, logical step-by-step thinking</phase>
-      <phase>A - Assessment: Self-evaluation and confidence scoring</phase>
-      <phase>C - Context: Understanding environment, constraints, and patterns</phase>
-      <phase>E - Execution: Implementation with proper structure and validation</phase>
-      <phase>F - Feedback: Learning from results and iteration</phase>
-    </core_philosophy>
-  </identity>
-
-  <enforcement_principles>
-    <principle importance="0.95">Evaluate ALL aspects of V-RACEF, not just one or two phases</principle>
-    <principle importance="0.92">Provide specific, actionable feedback with examples</principle>
-    <principle importance="0.88">Score each phase independently (0.0-1.0) and overall</principle>
-    <principle importance="0.85">Context-aware: adapt evaluation based on agent type and task complexity</principle>
-    <principle importance="0.82">Flag critical failures that must be addressed</principle>
-    <principle importance="0.78">Recognize partial compliance - praise what works, fix what doesn't</principle>
-    <principle importance="0.90">Verification phase is critical for factual claims - hallucinations must be caught</principle>
-  </enforcement_principles>
-
-  <evaluation_criteria>
-    <v_phase_verification>
-      <criterion weight="0.25">Extracts factual claims that can be independently verified</criterion>
-      <criterion weight="0.25">Generates verification questions answerable without seeing original claim</criterion>
-      <criterion weight="0.20">Answers verification questions independently (no bias from original)</criterion>
-      <criterion weight="0.15">Identifies and corrects inconsistencies between claims and verified facts</criterion>
-      <criterion weight="0.15">Uses external tools/sources when available for verification</criterion>
-    </v_phase_verification>
-
-    <r_phase_reasoning>
-      <criterion weight="0.25">Explicit reasoning chain with clear logical steps</criterion>
-      <criterion weight="0.20">Avoids logical fallacies or unsupported leaps</criterion>
-      <criterion weight="0.20">Explicitly states assumptions and their criticality</criterion>
-      <criterion weight="0.20">Considered alternatives before choosing approach</criterion>
-      <criterion weight="0.15">Uses structured thinking format (CoT, XML, etc.)</criterion>
-    </r_phase_reasoning>
-
-    <a_phase_assessment>
-      <criterion weight="0.25">Provides confidence breakdown by aspect</criterion>
-      <criterion weight="0.25">Identifies areas of uncertainty</criterion>
-      <criterion weight="0.20">Self-critiques potential issues before they occur</criterion>
-      <criterion weight="0.20">Recognizes limitations and trade-offs</criterion>
-      <criterion weight="0.10">Scores are realistic, not overconfident</criterion>
-    </a_phase_assessment>
-
-    <c_phase_context>
-      <criterion weight="0.25">Understands and respects codebase patterns</criterion>
-      <criterion weight="0.20">Acknowledges constraints and dependencies</criterion>
-      <criterion weight="0.20">Asks clarifying questions when context is insufficient</criterion>
-      <criterion weight="0.20">Adapts approach to existing architecture/style</criterion>
-      <criterion weight="0.15">Considers security, performance, maintainability implications</criterion>
-    </c_phase_context>
-
-    <e_phase_execution>
-      <criterion weight="0.25">Implementation matches planned approach</criterion>
-      <criterion weight="0.20">Code follows established patterns and conventions</criterion>
-      <criterion weight="0.20">Includes error handling and edge cases</criterion>
-      <criterion weight="0.20">Provides testing strategy or validation</criterion>
-      <criterion weight="0.15">Outputs are structured and parseable (XML/JSON if applicable)</criterion>
-    </e_phase_execution>
-
-    <f_phase_feedback>
-      <criterion weight="0.30">Explains what was done and why</criterion>
-      <criterion weight="0.25">Identifies potential issues or improvements</criterion>
-      <criterion weight="0.20">Provides confidence in implementation</criterion>
-      <criterion weight="0.15">Suggests next steps or follow-up actions</criterion>
-      <criterion weight="0.10">Documenting lessons learned for future reference</criterion>
-    </f_phase_feedback>
-  </evaluation_criteria>
-
-  <output_format>
-    You MUST return your evaluation in this exact XML structure:
-
-    <vracef_evaluation>
-      <agent_identity>
-        <name>Name of agent being evaluated</name>
-        <type>Type of agent (e.g., "Frontend", "Backend", "General")</type>
-        <task_description>Brief description of task</task_description>
-      </agent_identity>
-
-      <phase_scores>
-        <verification>
-          <score>0.0-1.0</score>
-          <summary>Brief summary of verification quality (CoVe compliance)</summary>
-          <strengths>
-            <strength importance="0.0-1.0">Description of strength</strength>
-          </strengths>
-          <weaknesses>
-            <weakness importance="0.0-1.0">Description of weakness</weakness>
-          </weaknesses>
-          <claims_checked>Number of factual claims verified</claims_checked>
-          <corrections_made>Number of corrections after verification</corrections_made>
-        </verification>
-
-        <reasoning>
-          <score>0.0-1.0</score>
-          <summary>Brief summary of reasoning quality</summary>
-          <strengths>
-            <strength importance="0.0-1.0">Description of strength</strength>
-          </strengths>
-          <weaknesses>
-            <weakness importance="0.0-1.0">Description of weakness</weakness>
-          </weaknesses>
-        </reasoning>
-
-        <assessment>
-          <score>0.0-1.0</score>
-          <summary>Brief summary of assessment quality</summary>
-          <strengths>
-            <strength importance="0.0-1.0">Description of strength</strength>
-          </strengths>
-          <weaknesses>
-            <weakness importance="0.0-1.0">Description of weakness</weakness>
-          </weaknesses>
-        </assessment>
-
-        <context>
-          <score>0.0-1.0</score>
-          <summary>Brief summary of context awareness</summary>
-          <strengths>
-            <strength importance="0.0-1.0">Description of strength</strength>
-          </strengths>
-          <weaknesses>
-            <weakness importance="0.0-1.0">Description of weakness</weakness>
-          </weaknesses>
-        </context>
-
-        <execution>
-          <score>0.0-1.0</score>
-          <summary>Brief summary of execution quality</summary>
-          <strengths>
-            <strength importance="0.0-1.0">Description of strength</strength>
-          </strengths>
-          <weaknesses>
-            <weakness importance="0.0-1.0">Description of weakness</weakness>
-          </weaknesses>
-        </execution>
-
-        <feedback>
-          <score>0.0-1.0</score>
-          <summary>Brief summary of feedback quality</summary>
-          <strengths>
-            <strength importance="0.0-1.0">Description of strength</strength>
-          </strengths>
-          <weaknesses>
-            <weakness importance="0.0-1.0">Description of weakness</weakness>
-          </weaknesses>
-        </feedback>
-      </phase_scores>
-
-      <overall_assessment>
-        <weighted_score>0.0-1.0</weighted_score>
-        <summary>Overall summary of agent's V-RACEF compliance</summary>
-        <passes_threshold>true/false</passes_threshold>
-        <threshold_used>0.0-1.0</threshold_used>
-      </overall_assessment>
-
-      <critical_failures>
-        <failure if_any="" criticality="0.8-1.0">
-          <phase>Which V-RACEF phase [V|R|A|C|E|F]</phase>
-          <description>Description of the failure</description>
-          <impact>Why this is critical</impact>
-          <must_fix>Required action to fix</must_fix>
-        </failure>
-      </critical_failures>
-
-      <improvement_priorities>
-        <priority level="critical" phase="[V|R|A|C|E|F]">
-          <description>What needs improvement</description>
-          <suggested_fix>How to improve</suggested_fix>
-          <expected_impact>0.0-1.0</expected_impact>
-        </priority>
-        <priority level="high" phase="[V|R|A|C|E|F]">
-          <description>What needs improvement</description>
-          <suggested_fix>How to improve</suggested_fix>
-          <expected_impact>0.0-1.0</expected_impact>
-        </priority>
-        <priority level="medium" phase="[V|R|A|C|E|F]">
-          <description>What needs improvement</description>
-          <suggested_fix>How to improve</suggested_fix>
-          <expected_impact>0.0-1.0</expected_impact>
-        </priority>
-      </improvement_priorities>
-
-      <positive_reinforcement>
-        <praise phase="[V|R|A|C|E|F]">Specific praise for excellent work in this phase</praise>
-        <insight>Broader insight about agent's strengths</insight>
-        <suggestion>How to leverage these strengths</suggestion>
-      </positive_reinforcement>
-
-      <recommendations>
-        <for_agent>
-          <recommendation priority="0.0-1.0">Specific recommendation for agent</recommendation>
-          <explanation>Why this recommendation</explanation>
-          <example>Example of how to apply</example>
-        </for_agent>
-        <for_prompt_engineer>
-          <recommendation priority="0.0-1.0">Suggestion for improving agent's system prompt</recommendation>
-          <explanation>Why this would help</explanation>
-        </for_prompt_engineer>
-        </recommendations>
-    </vracef_evaluation>
-  </output_format>
-
-   <evaluation_examples>
-    <!-- ONE COMPLETE EXAMPLE FOLLOWED BY SUMMARY NOTE -->
-    <example scenario="Agent provides code but no reasoning">
-      <racef_evaluation>
-        <agent_identity>
-          <name>CodeGenerator</name>
-          <type>Backend</type>
-          <task_description>Implement authentication endpoint</task_description>
-        </agent_identity>
-        <phase_scores>
-          <reasoning>
-            <score>0.35</score>
-            <summary>No explicit reasoning provided - jumps straight to implementation</summary>
-            <strengths/>
-            <weaknesses>
-              <weakness importance="0.9">No chain of thought or explanation of approach</weakness>
-              <weakness importance="0.8">Assumptions not stated</weakness>
-            </weaknesses>
-          </reasoning>
-          <assessment>
-            <score>0.40</score>
-            <summary>No confidence scores or uncertainty analysis</summary>
-            <strengths/>
-            <weaknesses>
-              <weakness importance="0.85">No confidence breakdown by aspect</weakness>
-              <weakness importance="0.75">No acknowledgment of potential issues</weakness>
-            </weaknesses>
-          </assessment>
-          <context>
-            <score>0.60</score>
-            <summary>Uses existing codebase patterns</summary>
-            <strengths>
-              <strength importance="0.8">Follows established authentication patterns</strength>
-            </strengths>
-            <weaknesses>
-              <weakness importance="0.5">Does not check for recent security updates</weakness>
-            </weaknesses>
-          </context>
-          <execution>
-            <score>0.80</score>
-            <summary>Code is well-structured and functional</summary>
-            <strengths>
-              <strength importance="0.9">Clean, readable implementation</strength>
-              <strength importance="0.85">Proper error handling</strength>
-            </strengths>
-            <weaknesses>
-              <weakness importance="0.3">Missing some edge case handling</weakness>
-            </weaknesses>
-          </execution>
-          <feedback>
-            <score>0.50</score>
-            <summary>Minimal post-implementation feedback</summary>
-            <strengths>
-              <strength importance="0.6">Brief explanation of implementation</strength>
-            </strengths>
-            <weaknesses>
-              <weakness importance="0.8">No testing strategy provided</weakness>
-              <weakness importance="0.7">No mention of next steps</weakness>
-            </weaknesses>
-          </feedback>
-        </phase_scores>
-        <overall_assessment>
-          <weighted_score>0.53</weighted_score>
-          <summary>Agent produces functional code but lacks RACEF structure in reasoning and assessment phases</summary>
-          <passes_threshold>false</passes_threshold>
-          <threshold_used>0.70</threshold_used>
-        </overall_assessment>
-        <critical_failures>
-          <failure criticality="0.95">
-            <phase>Reasoning</phase>
-            <description>No structured reasoning or chain of thought</description>
-            <impact>Without reasoning, outputs are hard to verify and learn from</impact>
-            <must_fix>Require agent to explicitly document reasoning before implementation</must_fix>
-          </failure>
-        </critical_failures>
-        <improvement_priorities>
-          <priority level="critical" phase="R">
-            <description>Add structured reasoning phase</description>
-            <suggested_fix>Implement CoT (Chain of Thought) section before code output</suggested_fix>
-            <expected_impact>0.90</expected_impact>
-          </priority>
-          <priority level="high" phase="A">
-            <description>Include confidence assessment</description>
-            <suggested_fix>Add confidence breakdown and uncertainty identification</suggested_fix>
-            <expected_impact>0.75</expected_impact>
-          </priority>
-          <priority level="medium" phase="F">
-            <description>Provide testing strategy</description>
-            <suggested_fix>Add section on how to test the implementation</suggested_fix>
-            <expected_impact>0.60</expected_impact>
-          </priority>
-        </improvement_priorities>
-        <positive_reinforcement>
-          <praise phase="E">Execution phase is excellent - code quality is high</praise>
-          <insight>Agent has strong coding skills and follows patterns well</insight>
-          <suggestion>Leverage this strength by pairing with reasoning-focused agents or prompts</suggestion>
-        </positive_reinforcement>
-        <recommendations>
-          <for_agent>
-            <recommendation priority="0.95">Always include explicit reasoning before implementation</recommendation>
-            <explanation>Reasoning makes outputs verifiable, teachable, and improves quality</explanation>
-            <example>Before code: "Approach: JWT tokens for auth. Why: Stateless, industry standard. Trade-offs: Token revocation complexity."</example>
-          </for_agent>
-          <for_prompt_engineer>
-            <recommendation priority="0.90">Add RACEF phase requirements to system prompt</recommendation>
-            <explanation>Explicit phase requirements will guide agent to follow RACEF structure</explanation>
-          </for_prompt_engineer>
-        </recommendations>
-      </racef_evaluation>
-    </example>
-    
-    <!-- Summary Note: Similar principles apply to evaluating different types of agent responses, prompts, or task specifications. Focus on clarity, completeness, and actionability. -->
-    
-    <example scenario="Agent demonstrates excellent RACEF compliance">
-      <racef_evaluation>
-        <agent_identity>
-          <name>ResearchAnalyst</name>
-          <type>General</type>
-          <task_description>Analyze market trends for AI adoption</task_description>
-        </agent_identity>
-        <phase_scores>
-          <reasoning>
-            <score>0.90</score>
-            <summary>Clear, step-by-step reasoning with stated assumptions</summary>
-            <strengths>
-              <strength importance="0.95">Structured chain of thought with logical progression</strength>
-              <strength importance="0.88">Explicitly states 3 key assumptions with criticality scores</strength>
-              <strength importance="0.82">Considered 2 alternative analytical approaches</strength>
-            </strengths>
-            <weaknesses>
-              <weakness importance="0.3">Could be more explicit about data sources</weakness>
-            </weaknesses>
-          </reasoning>
-          <assessment>
-            <score>0.85</score>
-            <summary>Confidence breakdown and uncertainty analysis provided</summary>
-            <strengths>
-              <strength importance="0.92">Breakdown of confidence by factual, completeness, coherence, relevance</strength>
-              <strength importance="0.85">Identified 2 areas of remaining uncertainty</strength>
-              <strength importance="0.80">Acknowledged limitations of analysis timeframe</strength>
-            </strengths>
-            <weaknesses>
-              <weakness importance="0.4">Could provide more specific uncertainty ranges</weakness>
-            </weaknesses>
-          </assessment>
-          <context>
-            <score>0.88</score>
-            <summary>Deep understanding of domain and constraints</summary>
-            <strengths>
-              <strength importance="0.90">Considers industry-specific factors</strength>
-              <strength importance="0.85">Acknowledges time period constraints (2023-2024 data)</strength>
-              <strength importance="0.82">Adapts methodology to available data</strength>
-            </strengths>
-            <weaknesses>
-              <weakness importance="0.3">Could reference more specific competitors</weakness>
-            </weaknesses>
-          </context>
-          <execution>
-            <score>0.87</score>
-            <summary>Analysis follows planned methodology</summary>
-            <strengths>
-              <strength importance="0.92">Findings organized by logical categories</strength>
-              <strength importance="0.85">Supports claims with data points</strength>
-              <strength importance="0.80">Uses consistent structure across sections</strength>
-            </strengths>
-            <weaknesses>
-              <weakness importance="0.4">Could provide more concrete examples</weakness>
-            </weaknesses>
-          </execution>
-          <feedback>
-            <score>0.82</score>
-            <summary>Good synthesis with actionable insights</summary>
-            <strengths>
-              <strength importance="0.88">Clear explanation of methodology and findings</strength>
-              <strength importance="0.85">Identifies 3 key actionable recommendations</strength>
-              <strength importance="0.75">Provides confidence in each recommendation</strength>
-            </strengths>
-            <weaknesses>
-              <weakness importance="0.5">Could suggest more specific follow-up research</weakness>
-            </weaknesses>
-          </feedback>
-        </phase_scores>
-        <overall_assessment>
-          <weighted_score>0.86</weighted_score>
-          <summary>Excellent RACEF compliance across all phases with minor room for improvement</summary>
-          <passes_threshold>true</passes_threshold>
-          <threshold_used>0.70</threshold_used>
-        </overall_assessment>
-        <critical_failures/>
-        <improvement_priorities>
-          <priority level="medium" phase="E">
-            <description>Add concrete examples to findings</description>
-            <suggested_fix>Include specific company examples for each trend</suggested_fix>
-            <expected_impact>0.50</expected_impact>
-          </priority>
-          <priority level="low" phase="F">
-            <description>Suggest specific next research steps</description>
-            <suggested_fix>List follow-up questions and data sources</suggested_fix>
-            <expected_impact>0.30</expected_impact>
-          </priority>
-        </improvement_priorities>
-        <positive_reinforcement>
-          <praise phase="R">Outstanding reasoning - structured, explicit, and thoughtful</praise>
-          <insight>Agent demonstrates advanced reasoning capabilities and meta-cognition</insight>
-          <suggestion>Consider using this agent as a template for other analytical tasks</suggestion>
-        </positive_reinforcement>
-        <recommendations>
-          <for_agent>
-            <recommendation priority="0.70">Consider adding more concrete examples</recommendation>
-            <explanation>Examples make abstract trends more actionable</explanation>
-            <example>"For example, Company X's adoption increased 300% after implementing feature Y"</example>
-          </for_agent>
-          <for_prompt_engineer>
-            <recommendation priority="0.40">Current prompt is excellent - minor refinements only</recommendation>
-            <explanation>Agent already demonstrates strong RACEF compliance</explanation>
-          </for_prompt_engineer>
-        </recommendations>
-      </racef_evaluation>
-    </example>
-  </evaluation_examples>
-
-  <special_considerations>
-    <agent_type_specific>
-      <frontend_agents>
-        <focus>Visual design and UI/UX structure</focus>
-        <additional_criteria>
-          <criterion>Does reasoning include design considerations (accessibility, responsiveness)?</criterion>
-          <criterion>Is feedback structured for designers/developers?</criterion>
-          <criterion>Are execution outputs properly formatted for frontend work (CSS, HTML, etc.)?</criterion>
-        </additional_criteria>
-      </frontend_agents>
-      <backend_agents>
-        <focus>API design, database interactions, business logic</focus>
-        <additional_criteria>
-          <criterion>Does reasoning consider security implications?</criterion>
-          <criterion>Is execution phase considering error handling thoroughly?</criterion>
-          <criterion>Are performance considerations documented in assessment?</criterion>
-        </additional_criteria>
-      </backend_agents>
-      <codebase_analysis_agents>
-        <focus>Understanding and navigating existing code</focus>
-        <additional_criteria>
-          <criterion>Does context phase demonstrate deep understanding of architecture?</criterion>
-          <criterion>Is reasoning aligned with existing patterns?</criterion>
-          <criterion>Does feedback suggest testing or validation strategies?</criterion>
-        </additional_criteria>
-      </codebase_analysis_agents>
-    </agent_type_specific>
-
-    <task_complexity_adaptation>
-      <simple_tasks>
-        <definition>Single-file changes, obvious bugs, straightforward questions</definition>
-        <adaptation>
-          <adjustment>Lower expectations for extensive reasoning</adjustment>
-          <weight>Focus on correctness and completeness</weight>
-          <threshold>Pass threshold: 0.65</threshold>
-        </adaptation>
-      </simple_tasks>
-      <moderate_tasks>
-        <definition>Feature implementation, multi-file changes, moderate complexity</definition>
-        <adaptation>
-          <adjustment>Expect balanced RACEF compliance</adjustment>
-          <weight>Equal weight across all phases</weight>
-          <threshold>Pass threshold: 0.75</threshold>
-        </adaptation>
-      </moderate_tasks>
-      <complex_tasks>
-        <definition>Architecture decisions, large refactors, novel problems</definition>
-        <adaptation>
-          <adjustment>Demand deep reasoning and thorough assessment</adjustment>
-          <weight>Higher weight on Reasoning and Context phases</weight>
-          <threshold>Pass threshold: 0.80</threshold>
-        </adaptation>
-      </complex_tasks>
-    </task_complexity_adaptation>
-  </special_considerations>
-
-  <enforcement_workflow>
-    When evaluating an agent's response:
-
-    1. <step>ANALYZE TASK COMPLEXITY</step>
-       - Determine if simple, moderate, or complex
-       - Set appropriate threshold (0.65, 0.75, or 0.80)
-       - Adjust evaluation focus based on agent type
-
-    2. <step>EVALUATE EACH PHASE</step>
-       - Score each V-RACEF phase independently (0.0-1.0)
-       - For V phase: Check if claims were extracted, verification questions generated, answered independently
-       - Provide specific strengths and weaknesses
-       - Quote evidence from response
-
-    3. <step>IDENTIFY CRITICAL FAILURES</step>
-       - Any phase scoring below 0.30 is critical
-       - Any missing phase entirely is critical
-       - Explain impact and required fix
-
-    4. <step>COMPUTE OVERALL SCORE</step>
-       - Weighted average based on task complexity (6 phases now)
-       - Simple: V=0.10, R=0.18, A=0.18, C=0.18, E=0.18, F=0.18
-       - Moderate: V=0.15, R=0.17, A=0.17, C=0.17, E=0.17, F=0.17
-       - Complex: V=0.20, R=0.20, A=0.15, C=0.20, E=0.13, F=0.12
-
-    5. <step>PRIORITIZE IMPROVEMENTS</step>
-       - Critical failures first (must fix)
-       - Then high-impact improvements (0.7+ expected impact)
-       - Then medium-impact improvements (0.5-0.7)
-       - Provide specific, actionable suggestions
-
-    6. <step>PROVIDE POSITIVE REINFORCEMENT</step>
-       - Identify what agent did well
-       - Explain why these strengths matter
-       - Suggest how to leverage them
-
-    7. <step>MAKE RECOMMENDATIONS</step>
-       - Specific recommendations for agent
-       - Suggestions for prompt engineers
-       - Prioritized by impact (0.0-1.0)
-  </enforcement_workflow>
-
-  <important_directives>
-    <directive>ALWAYS use the exact XML structure specified in <output_format></directive>
-    <directive>Score each phase independently - don't just give overall impression</directive>
-    <directive>Provide specific evidence for all claims (quote from response)</directive>
-    <directive>Be constructive - identify both strengths and weaknesses</directive>
-    <directive>Adapt evaluation based on task complexity and agent type</directive>
-    <directive>Flag critical failures that MUST be addressed</directive>
-    <directive>Prioritize improvements by expected impact</directive>
-    <directive>Never suppress type errors or ignore validation issues</directive>
-    <directive>V phase is CRITICAL for factual responses - unverified claims are potential hallucinations</directive>
-    <directive>When providing corrections, ALWAYS explain what was changed and why (e.g., "Removed ambiguity in line 5")</directive>
-  </important_directives>
-
-  <verification_phase_guidance>
-    The V (Verification) phase implements Chain of Verification (CoVe) from Meta AI research.
-
-    <cove_process>
-      <step order="1">CLAIM EXTRACTION: Identify factual claims that can be verified independently</step>
-      <step order="2">QUESTION GENERATION: Create verification questions answerable WITHOUT seeing the original claim</step>
-      <step order="3">INDEPENDENT ANSWERING: Answer questions using tools/knowledge, NOT referencing the original</step>
-      <step order="4">CORRECTION: Compare verified answers to original claims, fix inconsistencies</step>
-    </cove_process>
-
-    <evaluation_focus>
-      - Did agent extract verifiable claims (not opinions or reasoning)?
-      - Are verification questions truly independent (no bias from original)?
-      - Were answers generated without copying from baseline response?
-      - Were corrections applied when verification revealed errors?
-      - Were external tools used when available (search, RAG, etc.)?
-    </evaluation_focus>
-
-    <when_v_phase_matters_most>
-      - Factual claims about external world (dates, names, statistics)
-      - Technical specifications or API details
-      - Code behavior assertions
-      - Historical or scientific facts
-    </when_v_phase_matters_most>
-
-    <when_v_phase_matters_less>
-      - Pure reasoning or logic problems
-      - Opinion or preference requests
-      - Creative writing tasks
-      - Simple yes/no questions
-    </when_v_phase_matters_less>
-   </verification_phase_guidance>
-  
-  <intent_and_workflow>
-    <when_to_evaluat_and_improve>
-      When user provides instructions with phrases like "Please evaluate these instructions" or "evaluate these instructions":
-      
-      1. FIRST: Provide complete V-RACEF evaluation with scores
-      2. THEN: Provide CORRECTED/IMPROVED version of the instructions if needed
-      3. ALWAYS return BOTH evaluation and corrections in a single response
-      
-      DO NOT just say "I'll evaluate" without actually doing both.
-      
-      <decision_logic>
-        IF instructions contain critical errors (typos, unclear phrasing, missing context):
-          → Provide FULL CORRECTED VERSION with fixes applied
-          
-        IF instructions are incomplete or vague:
-          → Provide specific suggestions for completion or clarification
-          
-        IF instructions are generally good but could be improved:
-          → Provide specific refinements to enhance clarity
-          
-        IF instructions follow best practices already:
-          → Acknowledge strengths and suggest optional optimizations
-      </decision_logic>
-    </when_to_evaluat_and_improve>
-  
-  </intent_and_workflow>
-</vracef_enforcer_agent>
-""",
-)
 
 
 class DeltaType(str, Enum):
@@ -785,12 +147,514 @@ class DeltaGeneratorResponse(BaseModel):
     deltas: list[PromptDelta]
 
 
+# ============================================================================
+# Structured Output Models for VRACEF Agent System
+# ============================================================================
+
+
+class TaskComplexity(str, Enum):
+    SIMPLE = "simple"
+    MODERATE = "moderate"
+    COMPLEX = "complex"
+
+
+class AgentType(str, Enum):
+    FRONTEND = "Frontend"
+    BACKEND = "Backend"
+    GENERAL = "General"
+    CODEBASE_ANALYSIS = "Codebase Analysis"
+    OTHER = "Other"
+
+
+class TaskAnalysis(BaseModel):
+    """Output from VRACEFTaskAnalyzer - determines task complexity and agent type."""
+
+    complexity: TaskComplexity
+    agent_type: AgentType
+    threshold: float = Field(ge=0.0, le=1.0)
+    reasoning: str
+    v_phase_importance: float = Field(
+        description="How important V phase is for this task (0.0-1.0)"
+    )
+
+
+class Strength(BaseModel):
+    description: str
+    importance: float = Field(ge=0.0, le=1.0)
+
+
+class Weakness(BaseModel):
+    description: str
+    importance: float = Field(ge=0.0, le=1.0)
+
+
+class PhaseEvaluation(BaseModel):
+    """Output from VRACEFPhaseEvaluator - evaluates a single V-RACEF phase."""
+
+    phase: VRACEFPhase
+    score: float = Field(ge=0.0, le=1.0)
+    summary: str
+    strengths: list[Strength] = Field(default_factory=list[Strength])
+    weaknesses: list[Weakness] = Field(default_factory=list[Weakness])
+
+    # V-phase specific fields
+    claims_checked: int | None = Field(default=None)
+    corrections_made: int | None = Field(default=None)
+
+
+class OverallAssessment(BaseModel):
+    """Output from VRACEFScorer - computes weighted overall score."""
+
+    weighted_score: float = Field(ge=0.0, le=1.0)
+    summary: str
+    passes_threshold: bool
+    threshold_used: float
+    phase_scores: VRACEFScores
+
+
+class CriticalFailure(BaseModel):
+    """Represents a critical failure that must be addressed."""
+
+    phase: VRACEFPhase
+    description: str
+    impact: str
+    must_fix: str
+    criticality: float = Field(ge=0.8, le=1.0)
+
+
+class PriorityLevel(str, Enum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class ImprovementPriority(BaseModel):
+    """Represents an improvement recommendation with priority."""
+
+    level: PriorityLevel
+    phase: VRACEFPhase
+    description: str
+    suggested_fix: str
+    expected_impact: float = Field(ge=0.0, le=1.0)
+
+
+class PositiveReinforcement(BaseModel):
+    """Positive feedback to reinforce good behavior."""
+
+    praise: str = Field(description="Specific praise for excellent work")
+    phase: VRACEFPhase
+    insight: str = Field(description="Broader insight about agent's strengths")
+    suggestion: str = Field(description="How to leverage these strengths")
+
+
+class AgentRecommendation(BaseModel):
+    """Specific recommendation for the agent."""
+
+    priority: float = Field(ge=0.0, le=1.0)
+    recommendation: str
+    explanation: str
+    example: str | None = Field(default=None)
+
+
+class PromptEngineerRecommendation(BaseModel):
+    """Suggestion for improving the agent's system prompt."""
+
+    priority: float = Field(ge=0.0, le=1.0)
+    recommendation: str
+    explanation: str
+
+
+class Recommendations(BaseModel):
+    """Output from VRACEFRecommendationGenerator."""
+
+    for_agent: list[AgentRecommendation] = Field(default_factory=list[AgentRecommendation])
+    for_prompt_engineer: list[PromptEngineerRecommendation] = Field(
+        default_factory=list[PromptEngineerRecommendation]
+    )
+
+
+class VRACEFEvaluation(BaseModel):
+    """Complete V-RACEF evaluation result - orchestrates all agent outputs."""
+
+    agent_name: str
+    agent_type: AgentType
+    task_description: str
+    task_analysis: TaskAnalysis
+
+    phase_evaluations: dict[VRACEFPhase, PhaseEvaluation]
+    overall_assessment: OverallAssessment
+
+    critical_failures: list[CriticalFailure] = Field(default_factory=list[CriticalFailure])
+    improvement_priorities: list[ImprovementPriority] = Field(
+        default_factory=list[ImprovementPriority]
+    )
+    positive_reinforcement: list[PositiveReinforcement] = Field(
+        default_factory=list[PositiveReinforcement]
+    )
+    recommendations: Recommendations = Field(default_factory=Recommendations)
+
+    def to_xml(self) -> str:
+        """Convert evaluation to XML format for compatibility."""
+        lines = ["<vracef_evaluation>", "  <agent_identity>"]
+        lines.append(f"    <name>{self.agent_name}</name>")
+        lines.append(f"    <type>{self.agent_type.value}</type>")
+        lines.append(f"    <task_description>{self.task_description}</task_description>")
+        lines.append("  </agent_identity>")
+        lines.append("  <phase_scores>")
+
+        for phase, eval in self.phase_evaluations.items():
+            phase_tag = phase.value.lower()
+            lines.append(f"    <{phase_tag}>")
+            lines.append(f"      <score>{eval.score:.2f}</score>")
+            lines.append(f"      <summary>{eval.summary}</summary>")
+            lines.append("      <strengths>")
+            for s in eval.strengths:
+                lines.append(
+                    f'        <strength importance="{s.importance:.2f}">{s.description}</strength>'
+                )
+            lines.append("      </strengths>")
+            lines.append("      <weaknesses>")
+            for w in eval.weaknesses:
+                lines.append(
+                    f'        <weakness importance="{w.importance:.2f}">{w.description}</weakness>'
+                )
+            lines.append("      </weaknesses>")
+            lines.append(f"    </{phase_tag}>")
+
+        lines.append("  </phase_scores>")
+        lines.append("  <overall_assessment>")
+        lines.append(
+            f"    <weighted_score>{self.overall_assessment.weighted_score:.2f}</weighted_score>"
+        )
+        lines.append(f"    <summary>{self.overall_assessment.summary}</summary>")
+        lines.append(
+            f"    <passes_threshold>{str(self.overall_assessment.passes_threshold).lower()}</passes_threshold>"
+        )
+        lines.append(
+            f"    <threshold_used>{self.overall_assessment.threshold_used:.2f}</threshold_used>"
+        )
+        lines.append("  </overall_assessment>")
+
+        if self.critical_failures:
+            lines.append("  <critical_failures>")
+            for cf in self.critical_failures:
+                lines.append(f'    <failure criticality="{cf.criticality:.2f}">')
+                lines.append(f"      <phase>{cf.phase.value}</phase>")
+                lines.append(f"      <description>{cf.description}</description>")
+                lines.append(f"      <impact>{cf.impact}</impact>")
+                lines.append(f"      <must_fix>{cf.must_fix}</must_fix>")
+                lines.append("    </failure>")
+            lines.append("  </critical_failures>")
+
+        lines.append("</vracef_evaluation>")
+        return "\n".join(lines)
+
+
+VRACEF_TASK_ANALYZER = Agent(
+    id="vracef-task-analyzer",
+    name="V-RACEF Task Analyzer",
+    output_schema=TaskAnalysis,
+    instructions=dedent("""
+        Analyze the task to determine complexity level and agent type.
+
+        <thinking>
+          1. ANALYZE TASK DESCRIPTION
+             - What is the agent trying to accomplish?
+             - How many steps are involved?
+             - What dependencies or constraints exist?
+
+          2. DETERMINE COMPLEXITY
+             - Simple: Single-file changes, obvious bugs, straightforward questions
+             - Moderate: Feature implementation, multi-file changes, moderate complexity
+             - Complex: Architecture decisions, large refactors, novel problems
+
+          3. IDENTIFY AGENT TYPE
+             - Frontend: Visual design, UI/UX structure
+             - Backend: API design, database interactions, business logic
+             - General: Research, analysis, writing
+             - Codebase Analysis: Understanding and navigating existing code
+
+          4. SET THRESHOLD
+             - Simple: 0.65 (focus on correctness)
+             - Moderate: 0.75 (balanced RACEF compliance)
+             - Complex: 0.80 (demand deep reasoning)
+
+          5. ASSESS V-PHASE IMPORTANCE
+             - High (0.8-1.0): Factual claims, technical specs, code behavior
+             - Medium (0.4-0.7): Analysis with some factual elements
+             - Low (0.0-0.3): Pure reasoning, creative tasks, opinions
+        </thinking>
+
+        <output_format>
+        <thinking>
+        [Your analysis of task complexity, agent type, threshold, and V-phase importance]
+        </thinking>
+
+        [Your TaskAnalysis structured output: complexity, agent_type, threshold, reasoning, v_phase_importance]
+        </output_format>
+    """),
+)
+
+
+VRACEF_PHASE_EVALUATOR = Agent(
+    id="vracef-phase-evaluator",
+    name="V-RACEF Phase Evaluator",
+    output_schema=PhaseEvaluation,
+    instructions=dedent("""
+        Evaluate a single V-RACEF phase for the agent's response.
+
+        <thinking>
+          1. IDENTIFY THE PHASE
+             - Which phase are you evaluating? (V, R, A, C, E, F)
+             - What are the key criteria for this phase?
+
+          2. ANALYZE THE RESPONSE
+             - What did the agent do well in this phase?
+             - What is missing or weak?
+             - Quote specific evidence from the response
+
+          3. ASSIGN SCORE (0.0-1.0)
+             - Consider the criteria for this specific phase
+             - Be objective and evidence-based
+             - 0.9-1.0: Excellent, exceeds expectations
+             - 0.7-0.9: Good, meets expectations
+             - 0.5-0.7: Acceptable, has room for improvement
+             - 0.3-0.5: Weak, needs significant improvement
+             - 0.0-0.3: Critical failure
+
+          4. IDENTIFY STRENGTHS
+             - What specific behaviors or outputs were good?
+             - Rate importance of each strength (0.0-1.0)
+
+          5. IDENTIFY WEAKNESSES
+             - What specific behaviors or outputs were lacking?
+             - Rate importance of each weakness (0.0-1.0)
+
+          6. V-PHASE SPECIFIC (if evaluating V phase)
+             - Count factual claims extracted
+             - Count corrections made after verification
+        </thinking>
+
+        <output_format>
+        <thinking>
+        [Your phase evaluation analysis - identify phase, analyze response, assign score with evidence, identify strengths and weaknesses]
+        </thinking>
+
+        [Your PhaseEvaluation structured output: phase, score, summary, strengths, weaknesses, claims_checked, corrections_made]
+        </output_format>
+    """),
+)
+
+
+VRACEF_SCORER = Agent(
+    id="vracef-scorer",
+    name="V-RACEF Scorer",
+    output_schema=OverallAssessment,
+    instructions=dedent("""
+        Compute the overall V-RACEF score based on phase scores and task complexity.
+
+        <thinking>
+          1. REVIEW PHASE SCORES
+             - Check all 6 phase scores
+             - Identify which phases are strong/weak
+
+          2. APPLY WEIGHTS BASED ON COMPLEXITY
+             - Simple: V=0.10, R=0.18, A=0.18, C=0.18, E=0.18, F=0.18
+             - Moderate: V=0.15, R=0.17, A=0.17, C=0.17, E=0.17, F=0.17
+             - Complex: V=0.20, R=0.20, A=0.15, C=0.20, E=0.13, F=0.12
+
+          3. COMPUTE WEIGHTED SCORE
+             - Multiply each phase score by its weight
+             - Sum the weighted scores
+
+          4. CHECK THRESHOLD
+             - Compare weighted score to threshold
+             - Determine if passes
+
+          5. WRITE SUMMARY
+             - Overall assessment of V-RACEF compliance
+             - Note any critical areas
+        </thinking>
+
+        <output_format>
+        <thinking>
+        [Your scoring analysis - review phase scores, apply weights, compute weighted score, check threshold, write summary]
+        </thinking>
+
+        [Your OverallAssessment structured output: weighted_score, summary, passes_threshold, threshold_used, phase_scores]
+        </output_format>
+    """),
+)
+
+
+VRACEF_IMPROVEMENT_PRIORITIZER = Agent(
+    id="vracef-improvement-prioritizer",
+    name="V-RACEF Improvement Prioritizer",
+    output_schema=list[ImprovementPriority],  # type: ignore
+    instructions=dedent("""
+        Prioritize improvements based on phase evaluations and overall assessment.
+
+        <thinking>
+          1. IDENTIFY CRITICAL FAILURES
+             - Any phase scoring below 0.30?
+             - Any missing phases entirely?
+             - Mark as CRITICAL priority
+
+          2. FIND HIGH-IMPACT IMPROVEMENTS
+             - Look for expected_impact > 0.7
+             - These are HIGH priority
+
+          3. FIND MEDIUM-IMPACT IMPROVEMENTS
+             - Look for expected_impact 0.5-0.7
+             - These are MEDIUM priority
+
+          4. FOR EACH IMPROVEMENT
+             - Which phase does it address?
+             - What specifically needs improvement?
+             - What is the suggested fix?
+             - What is the expected impact?
+
+          5. PRIORITIZE
+             - Critical failures first
+             - Then by expected impact (descending)
+        </thinking>
+
+        <output_format>
+        <thinking>
+        [Your prioritization analysis - identify critical failures, find high/medium/low impact improvements, prioritize by impact]
+        </thinking>
+
+        [Your list of ImprovementPriority structured outputs: level, phase, description, suggested_fix, expected_impact]
+        </output_format>
+    """),
+)
+
+
+VRACEF_REINFORCEMENT_GENERATOR = Agent(
+    id="vracef-reinforcement-generator",
+    name="V-RACEF Positive Reinforcement Generator",
+    output_schema=list[PositiveReinforcement],  # type: ignore
+    instructions=dedent("""
+        Generate positive reinforcement to recognize and encourage good behavior.
+
+        <thinking>
+          1. IDENTIFY STRENGTHS
+             - Which phases scored well (0.7+)?
+             - What specific behaviors were good?
+
+          2. ANALYZE IMPACT
+             - Why do these strengths matter?
+             - How do they contribute to overall quality?
+
+          3. PROVIDE PRAISE
+             - Specific praise for excellent work
+             - Which phase does this relate to?
+
+          4. OFFER INSIGHT
+             - Broader insight about agent's capabilities
+             - What does this say about the agent?
+
+          5. SUGGEST LEVERAGE
+             - How can these strengths be leveraged?
+             - What should the agent continue doing?
+        </thinking>
+
+        <output_format>
+        <thinking>
+        [Your reinforcement analysis - identify strengths, analyze impact, provide praise, offer insight, suggest leverage]
+        </thinking>
+
+        [Your list of PositiveReinforcement structured outputs: praise, phase, insight, suggestion]
+        </output_format>
+    """),
+)
+
+
+VRACEF_RECOMMENDATION_GENERATOR = Agent(
+    id="vracef-recommendation-generator",
+    name="V-RACEF Recommendation Generator",
+    output_schema=Recommendations,
+    instructions=dedent("""
+        Generate specific recommendations for the agent and prompt engineer.
+
+        <thinking>
+          FOR AGENT RECOMMENDATIONS:
+          1. What specific changes should the agent make?
+          2. Why would this help?
+          3. Can you provide an example?
+          4. Prioritize by impact (0.0-1.0)
+
+          FOR PROMPT ENGINEER RECOMMENDATIONS:
+          1. What system prompt changes would help?
+          2. Why would these improve the agent?
+          3. Prioritize by impact (0.0-1.0)
+
+          Focus on:
+          - Addressing the weakest phase
+          - Leveraging the strongest phase
+          - Practical, actionable suggestions
+        </thinking>
+
+        <output_format>
+        <thinking>
+        [Your recommendation analysis - for agent: specific changes with examples, for prompt engineer: system prompt changes, all prioritized by impact]
+        </thinking>
+
+        [Your Recommendations structured output: for_agent (list of AgentRecommendation), for_prompt_engineer (list of PromptEngineerRecommendation)]
+        </output_format>
+    """),
+)
+
+
 DELTA_GENERATOR_AGENT = Agent(
     id="vracef-delta-generator",
     name="V-RACEF Delta Generator",
     output_schema=DeltaGeneratorResponse,
     instructions=dedent("""
         You generate atomic prompt deltas to improve an agent's instructions based on V-RACEF evaluation feedback.
+
+        <thinking_process>
+          CRITICAL: Before generating deltas, you MUST think through the analysis using the <thinking> section.
+
+          <thinking>
+            1. ANALYZE V-RACEF EVALUATION
+               - Which phase has the LOWEST score? (weakest_phase)
+               - Are there any critical failures (scores < 0.30)?
+               - What are the highest-priority improvement recommendations?
+
+            2. UNDERSTAND THE AGENT
+               - Read the current instructions
+               - Read the description
+               - Read the expected_output (if any)
+               - Identify patterns and structure
+
+            3. IDENTIFY ROOT CAUSE
+               - What specific weakness is causing the low score?
+               - Is it a missing instruction? Unclear instruction? Conflicting instruction?
+               - Would the issue be better addressed in description or expected_output?
+
+            4. GENERATE ATOMIC DELTA
+               - Choose the BEST delta type for this issue
+               - Write specific, actionable content (no vague "be better" statements)
+               - Ensure it's reversible and doesn't break existing behavior
+               - Explain WHY this delta will help (reasoning)
+               - Estimate expected impact (0.0-1.0)
+
+            5. VALIDATE DELTA
+               - Is it atomic? (one change only)
+               - Is it specific? (clear content)
+               - Does it target the weakest phase?
+               - Will it preserve existing working behavior?
+
+            6. CONSIDER ADDITIONAL DELTAS
+               - Can we address 2-3 related issues with multiple deltas?
+               - Ensure each delta is independent
+               - Prioritize by impact
+          </thinking>
+
+          ONLY AFTER completing this analysis, generate the structured output with your deltas.
+        </thinking_process>
 
         INPUT:
         - Current agent instructions, description, and expected_output
@@ -818,8 +682,232 @@ DELTA_GENERATOR_AGENT = Agent(
         1. Fix critical failures (scores < 0.30)
         2. Address high-impact improvements (expected_impact > 0.7)
         3. Improve medium-impact areas (expected_impact 0.5-0.7)
+
+        <output_format>
+        <thinking>
+        [Your analysis following the 6-step thinking process: analyze V-RACEF evaluation, understand agent, identify root cause, generate atomic delta, validate delta, consider additional deltas]
+        </thinking>
+        [Your DeltaGeneratorResponse structured output:
+        - deltas: list of PromptDelta with operation_type, target_section, content, reasoning, expected_impact
+        - weakest_phase: the phase with lowest score
+        - expected_improvement: how much scores should improve]
+        </output_format>
     """),
 )
+
+
+# ============================================================================
+# VRACEF Orchestrator - Coordinates all specialized agents
+# ============================================================================
+
+
+class VRACEFOrchestrator:
+    """Orchestrates multiple specialized VRACEF agents for comprehensive evaluation.
+
+    This replaces the monolithic VRACEF_ENFORCER with a coordinated team of
+    specialized agents, each with their own structured output schema.
+
+    Usage:
+        orchestrator = VRACEFOrchestrator(model=your_model)
+        evaluation = await orchestrator.evaluate_agent(
+            agent=agent_to_test,
+            test_input=input_text,
+            expected_output=expected_text
+        )
+    """
+
+    def __init__(self, model: Model) -> None:
+        self.model = model
+        self.task_analyzer = VRACEF_TASK_ANALYZER
+        self.phase_evaluator = VRACEF_PHASE_EVALUATOR
+        self.scorer = VRACEF_SCORER
+        self.improvement_prioritizer = VRACEF_IMPROVEMENT_PRIORITIZER
+        self.reinforcement_generator = VRACEF_REINFORCEMENT_GENERATOR
+        self.recommendation_generator = VRACEF_RECOMMENDATION_GENERATOR
+
+    async def evaluate_agent(
+        self,
+        agent: Agent,
+        test_input: str,
+        expected_output: str,
+        observations: str | None = None,
+    ) -> VRACEFEvaluation:
+        """Run complete V-RACEF evaluation using specialized agents.
+
+        Args:
+            agent: The agent to evaluate
+            test_input: Input to test the agent with
+            expected_output: Expected output from the agent
+            observations: Optional notes about the test case
+
+        Returns:
+            Complete V-RACEF evaluation with all phase scores and recommendations
+        """
+        # Get agent's response
+        agent_response = agent.run(test_input)
+        agent_output = str(agent_response.content) if agent_response.content else ""
+
+        # Step 1: Analyze task complexity and agent type
+        task_input = f"""
+        <task_context>
+            <agent_name>{agent.name or "Unknown"}</agent_name>
+            <agent_instructions>{agent.instructions or ""}</agent_instructions>
+            <task_input>{test_input}</task_input>
+            <expected_output>{expected_output}</expected_output>
+            <agent_output_preview>{agent_output[:500]}...</agent_output_preview>
+        </task_context>
+        """
+
+        task_response = await self.task_analyzer.arun(task_input, model=self.model)
+        task_analysis: TaskAnalysis = task_response.content  # type: ignore
+
+        # Step 2: Evaluate each phase
+        phase_evaluations: dict[VRACEFPhase, PhaseEvaluation] = {}
+
+        for phase in VRACEFPhase:
+            phase_input = f"""
+            <phase_evaluation_request>
+                <phase>{phase.value}</phase>
+                <agent_name>{agent.name or "Unknown"}</agent_name>
+                <agent_instructions>{agent.instructions or ""}</agent_instructions>
+                <task_input>{test_input}</task_input>
+                <expected_output>{expected_output}</expected_output>
+                <actual_output>{agent_output}</actual_output>
+                <observations>{observations or "None"}</observations>
+                <v_phase_importance>{task_analysis.v_phase_importance}</v_phase_importance>
+
+                <phase_criteria>
+                    {
+                "V": "Extract claims, generate verification questions, answer independently, correct errors",
+                        "R": "Explicit reasoning chain, avoid fallacies, state assumptions, consider alternatives",
+                        "A": "Confidence breakdown, identify uncertainty, self-critique, recognize limitations",
+                        "C": "Understand codebase patterns, acknowledge constraints, ask clarifying questions",
+                        "E": "Match planned approach, follow conventions, include error handling, provide testing",
+                        "F": "Explain what was done, identify issues, provide confidence, suggest next steps"
+                    }.get(phase.value)
+                </phase_criteria>
+            </phase_evaluation_request>
+            """
+
+            phase_response = await self.phase_evaluator.arun(phase_input, model=self.model)
+            phase_eval: PhaseEvaluation = phase_response.content  # type: ignore
+            phase_evaluations[phase] = phase_eval
+
+        # Step 3: Compute overall score
+        scorer_input = f"""
+        <scoring_request>
+            <complexity>{task_analysis.complexity.value}</complexity>
+            <threshold>{task_analysis.threshold}</threshold>
+            <phase_scores>
+                <V>{phase_evaluations[VRACEFPhase.VERIFICATION].score}</V>
+                <R>{phase_evaluations[VRACEFPhase.REASONING].score}</R>
+                <A>{phase_evaluations[VRACEFPhase.ASSESSMENT].score}</A>
+                <C>{phase_evaluations[VRACEFPhase.CONTEXT].score}</C>
+                <E>{phase_evaluations[VRACEFPhase.EXECUTION].score}</E>
+                <F>{phase_evaluations[VRACEFPhase.FEEDBACK].score}</F>
+            </phase_scores>
+        </scoring_request>
+        """
+
+        scorer_response = await self.scorer.arun(scorer_input, model=self.model)
+        overall_assessment: OverallAssessment = scorer_response.content  # type: ignore
+
+        # Step 4: Prioritize improvements
+        priority_input = f"""
+        <priority_request>
+            <phase_evaluations>
+                {
+            json.dumps(
+                {phase.value: eval.model_dump() for phase, eval in phase_evaluations.items()},
+                indent=2,
+            )
+        }
+            </phase_evaluations>
+            <overall_assessment>
+                {json.dumps(overall_assessment.model_dump(), indent=2)}
+            </overall_assessment>
+            <threshold>{task_analysis.threshold}</threshold>
+        </priority_request>
+        """
+
+        priority_response = await self.improvement_prioritizer.arun(
+            priority_input, model=self.model
+        )
+        improvement_priorities: list[ImprovementPriority] = priority_response.content  # type: ignore
+
+        # Step 5: Generate positive reinforcement
+        reinforcement_input = f"""
+        <reinforcement_request>
+            <phase_evaluations>
+                {
+            json.dumps(
+                {phase.value: eval.model_dump() for phase, eval in phase_evaluations.items()},
+                indent=2,
+            )
+        }
+            </phase_evaluations>
+        </reinforcement_request>
+        """
+
+        reinforcement_response = await self.reinforcement_generator.arun(
+            reinforcement_input, model=self.model
+        )
+        positive_reinforcement: list[PositiveReinforcement] = reinforcement_response.content  # type: ignore
+
+        # Step 6: Generate recommendations
+        recommendation_input = f"""
+        <recommendation_request>
+            <agent_name>{agent.name or "Unknown"}</agent_name>
+            <agent_type>{task_analysis.agent_type.value}</agent_type>
+            <weakest_phase>{overall_assessment.phase_scores.weakest_phase().value}</weakest_phase>
+            <phase_evaluations>
+                {
+            json.dumps(
+                {phase.value: eval.model_dump() for phase, eval in phase_evaluations.items()},
+                indent=2,
+            )
+        }
+            </phase_evaluations>
+            <improvement_priorities>
+                {json.dumps([p.model_dump() for p in improvement_priorities], indent=2)}
+            </improvement_priorities>
+            <positive_reinforcement>
+                {json.dumps([r.model_dump() for r in positive_reinforcement], indent=2)}
+            </positive_reinforcement>
+        </recommendation_request>
+        """
+
+        recommendation_response = await self.recommendation_generator.arun(
+            recommendation_input, model=self.model
+        )
+        recommendations: Recommendations = recommendation_response.content  # type: ignore
+
+        # Identify critical failures
+        critical_failures = [
+            CriticalFailure(
+                phase=phase,
+                description=f"Critical failure: score {eval.score:.2f} below 0.30",
+                impact=f"Phase {phase.value} performance is critically low",
+                must_fix=f"Immediate attention required for {phase.value} phase",
+                criticality=1.0 - eval.score,
+            )
+            for phase, eval in phase_evaluations.items()
+            if eval.score < 0.30
+        ]
+
+        # Assemble complete evaluation
+        return VRACEFEvaluation(
+            agent_name=agent.name or "Unknown",
+            agent_type=task_analysis.agent_type,
+            task_description=test_input[:200],
+            task_analysis=task_analysis,
+            phase_evaluations=phase_evaluations,
+            overall_assessment=overall_assessment,
+            critical_failures=critical_failures,
+            improvement_priorities=improvement_priorities,
+            positive_reinforcement=positive_reinforcement,
+            recommendations=recommendations,
+        )
 
 
 @dataclass
@@ -855,7 +943,7 @@ class VRacefPromptOptimizer:
                     test_cases.append(TestCase(**data))
 
         self.test_cases = test_cases
-        logger.info(f"Loaded {len(test_cases)} test cases from {jsonl_path}")
+        log_info(f"Loaded {len(test_cases)} test cases from {jsonl_path}")
         return test_cases
 
     def _run_accuracy_eval(
@@ -880,7 +968,7 @@ class VRacefPromptOptimizer:
 
             return passed, result.avg_score, actual_output
         except Exception as e:
-            logger.exception(f"Error running accuracy eval: {e}")
+            log_exception(f"Error running accuracy eval: {e}")
             return False, 0.0, str(e)
 
     def run_regression_tests(self, agent: Agent) -> RegressionResult:
@@ -923,25 +1011,36 @@ class VRacefPromptOptimizer:
             failures=failed_results,
         )
 
-    def _run_vracef_evaluation(self, agent: Agent, test_case: TestCase) -> tuple[str, VRACEFScores]:
-        agent_response = agent.run(test_case.input)
-        agent_output = str(agent_response.content) if agent_response.content else ""
+    async def _run_vracef_evaluation(
+        self, agent: Agent, test_case: TestCase
+    ) -> tuple[str, VRACEFScores]:
+        """Run V-RACEF evaluation using the new orchestrator with specialized agents.
 
-        vracef_input = f"""
-        <evaluation_request>
-            <agent_name>{agent.name or "Unknown"}</agent_name>
-            <agent_instructions>{agent.instructions or ""}</agent_instructions>
-            <task_input>{test_case.input}</task_input>
-            <expected_output>{test_case.expected_output}</expected_output>
-            <actual_output>{agent_output}</actual_output>
-            <observations>{test_case.observations or "None provided"}</observations>
-        </evaluation_request>
+        Returns:
+            Tuple of (XML output string for compatibility, VRACEFScores object)
         """
+        orchestrator = VRACEFOrchestrator(model=self.evaluator_model)
+        evaluation = await orchestrator.evaluate_agent(
+            agent=agent,
+            test_input=test_case.input,
+            expected_output=test_case.expected_output,
+            observations=test_case.observations,
+        )
 
-        vracef_response = VRACEF_ENFORCER.run(vracef_input, model=self.evaluator_model)
-        vracef_output = str(vracef_response.content) if vracef_response.content else ""
+        # Convert to XML for backward compatibility with existing code
+        vracef_output = evaluation.to_xml()
 
-        scores = self._parse_vracef_scores(vracef_output)
+        # Extract scores from the evaluation
+        scores = VRACEFScores(
+            verification=evaluation.phase_evaluations[VRACEFPhase.VERIFICATION].score,
+            reasoning=evaluation.phase_evaluations[VRACEFPhase.REASONING].score,
+            assessment=evaluation.phase_evaluations[VRACEFPhase.ASSESSMENT].score,
+            context=evaluation.phase_evaluations[VRACEFPhase.CONTEXT].score,
+            execution=evaluation.phase_evaluations[VRACEFPhase.EXECUTION].score,
+            feedback=evaluation.phase_evaluations[VRACEFPhase.FEEDBACK].score,
+            overall=evaluation.overall_assessment.weighted_score,
+        )
+
         return vracef_output, scores
 
     def _parse_vracef_scores(self, vracef_output: str) -> VRACEFScores:
@@ -987,7 +1086,7 @@ class VRacefPromptOptimizer:
 
         return scores
 
-    def _generate_deltas(
+    async def _generate_deltas(
         self,
         agent: Agent,
         vracef_output: str,
@@ -1024,7 +1123,7 @@ class VRacefPromptOptimizer:
         </delta_generation_request>
         """
 
-        response = DELTA_GENERATOR_AGENT.run(delta_input, model=self.evaluator_model)
+        response = await DELTA_GENERATOR_AGENT.arun(delta_input, model=self.evaluator_model)
 
         if response.content and isinstance(response.content, DeltaGeneratorResponse):
             return response.content.deltas
@@ -1089,14 +1188,14 @@ class VRacefPromptOptimizer:
             return "\n".join(raw)
         return ""
 
-    def _run_consensus_validation(
+    async def _run_consensus_validation(
         self, agent: Agent, test_cases: list[TestCase]
     ) -> tuple[bool, float]:
         if not self.use_consensus_for_final_validation:
             return True, 1.0
 
         if self.consensus_config is None:
-            logger.info("No consensus config provided, skipping consensus validation")
+            log_info("No consensus config provided, skipping consensus validation")
             return True, 1.0
 
         total_score = 0.0
@@ -1105,18 +1204,18 @@ class VRacefPromptOptimizer:
         for test_case in test_cases:
             try:
                 consensus_hook = self.consensus_config.pre_hook()
-                response = agent.run(test_case.input, pre_hooks=[consensus_hook])
+                response = await agent.arun(test_case.input, pre_hooks=[consensus_hook])
 
                 if response.content:
                     passed_count += 1
                     total_score += 1.0
             except Exception as e:
-                logger.warning(f"Consensus validation failed for test case {test_case.id}: {e}")
+                log_warning(f"Consensus validation failed for test case {test_case.id}: {e}")
 
         avg_score = total_score / len(test_cases) if test_cases else 0.0
         all_passed = passed_count == len(test_cases)
 
-        logger.info(
+        log_info(
             f"Consensus validation: {passed_count}/{len(test_cases)} passed, avg score: {avg_score:.2f}"
         )
         return all_passed, avg_score
@@ -1126,13 +1225,14 @@ class VRacefPromptOptimizer:
             self.history_path.parent.mkdir(parents=True, exist_ok=True)
             with self.history_path.open("w") as f:
                 f.write(self.history.model_dump_json(indent=2))
-            logger.info(f"Saved optimization history to {self.history_path}")
+            log_info(f"Saved optimization history to {self.history_path}")
 
-    def optimize(
+    async def aoptimize(
         self,
         jsonl_path: str | Path | None = None,
         sample_test_case: TestCase | None = None,
     ) -> Agent:
+        """Async version of optimize - uses orchestrator with specialized agents."""
         if jsonl_path:
             self.load_dataset(jsonl_path)
 
@@ -1148,34 +1248,34 @@ class VRacefPromptOptimizer:
         baseline_regression = self.run_regression_tests(current_agent)
         current_score = baseline_regression.avg_score
 
-        logger.info(
+        log_info(
             f"Baseline score: {current_score:.2f} ({baseline_regression.passed_cases}/{baseline_regression.total_cases} passed)"
         )
 
         eval_test_case = sample_test_case or self.test_cases[0]
 
         for iteration in range(self.max_iterations):
-            logger.info(f"Optimization iteration {iteration + 1}/{self.max_iterations}")
+            log_info(f"Optimization iteration {iteration + 1}/{self.max_iterations}")
 
-            vracef_output, scores = self._run_vracef_evaluation(current_agent, eval_test_case)
-            logger.info(
+            vracef_output, scores = await self._run_vracef_evaluation(current_agent, eval_test_case)
+            log_info(
                 f"V-RACEF scores - V:{scores.verification:.2f} R:{scores.reasoning:.2f} A:{scores.assessment:.2f} C:{scores.context:.2f} E:{scores.execution:.2f} F:{scores.feedback:.2f} Overall:{scores.overall:.2f}"
             )
 
             if scores.overall >= 0.85 and baseline_regression.passed:
-                logger.info("Agent already has high V-RACEF compliance. Stopping optimization.")
+                log_info("Agent already has high V-RACEF compliance. Stopping optimization.")
                 break
 
-            deltas = self._generate_deltas(
+            deltas = await self._generate_deltas(
                 current_agent, vracef_output, scores, baseline_regression.failures
             )
 
             if not deltas:
-                logger.info("No deltas generated. Stopping optimization.")
+                log_info("No deltas generated. Stopping optimization.")
                 break
 
             delta = deltas[0]
-            logger.info(f"Applying delta: {delta.delta_type.value} - {delta.reasoning[:100]}...")
+            log_info(f"Applying delta: {delta.delta_type.value} - {delta.reasoning[:100]}...")
 
             candidate_agent = self._apply_delta(current_agent, delta)
             regression_result = self.run_regression_tests(candidate_agent)
@@ -1196,16 +1296,16 @@ class VRacefPromptOptimizer:
             )
 
             if should_accept and self.use_consensus_for_final_validation and self.consensus_config:
-                logger.info("Running consensus validation before accepting delta...")
-                consensus_passed, _ = self._run_consensus_validation(
+                log_info("Running consensus validation before accepting delta...")
+                consensus_passed, _ = await self._run_consensus_validation(
                     candidate_agent, self.test_cases[:3]
                 )
                 if not consensus_passed:
-                    logger.info("Consensus validation failed. Rejecting delta.")
+                    log_info("Consensus validation failed. Rejecting delta.")
                     should_accept = False
 
             if should_accept:
-                logger.info(
+                log_info(
                     f"Delta accepted! Score: {current_score:.2f} -> {regression_result.avg_score:.2f}"
                 )
                 current_agent = candidate_agent
@@ -1214,7 +1314,7 @@ class VRacefPromptOptimizer:
                 if self.history:
                     self.history.total_deltas_applied += 1
             else:
-                logger.info(
+                log_info(
                     f"Delta rejected. Regression: {regression_result.passed}, Score: {regression_result.avg_score:.2f} (was {current_score:.2f})"
                 )
                 if self.history:
@@ -1228,7 +1328,7 @@ class VRacefPromptOptimizer:
             if iteration > 0 and self.history and len(self.history.iterations) >= 2:
                 prev_score = self.history.iterations[-2].after_score
                 if abs(current_score - prev_score) < self.convergence_threshold:
-                    logger.info(
+                    log_info(
                         f"Convergence reached (delta < {self.convergence_threshold}). Stopping."
                     )
                     break
@@ -1238,20 +1338,30 @@ class VRacefPromptOptimizer:
 
         self._save_history()
 
-        logger.info(f"Optimization complete. Final score: {current_score:.2f}")
+        log_info(f"Optimization complete. Final score: {current_score:.2f}")
         if self.history:
-            logger.info(
+            log_info(
                 f"Deltas applied: {self.history.total_deltas_applied}, rejected: {self.history.total_deltas_rejected}"
             )
 
         return current_agent
 
-    async def aoptimize(
+    def optimize(
         self,
         jsonl_path: str | Path | None = None,
         sample_test_case: TestCase | None = None,
     ) -> Agent:
-        return self.optimize(jsonl_path=jsonl_path, sample_test_case=sample_test_case)
+        """Sync version of optimize - wraps async version."""
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        return loop.run_until_complete(
+            self.aoptimize(jsonl_path=jsonl_path, sample_test_case=sample_test_case)
+        )
 
 
 # ============================================================================
@@ -1307,14 +1417,16 @@ class InteractiveDatasetGenerator:
     def save_entry(
         self,
         input_text: str,
-        expected_output: str | None = None,
+        expected_output: BaseModel | str,
         observations: str | None = None,
     ) -> None:
         self.dataset_path.parent.mkdir(parents=True, exist_ok=True)
 
-        entry: dict[str, Any] = {"input": input_text}
+        entry: dict[str, str | None] = {"input": input_text}
 
-        if expected_output is not None:
+        if isinstance(expected_output, BaseModel):
+            entry["expected_output"] = expected_output.model_dump_json()
+        else:
             entry["expected_output"] = expected_output
 
         if observations is not None:
@@ -1323,78 +1435,15 @@ class InteractiveDatasetGenerator:
         with self.dataset_path.open("a") as f:
             f.write(json.dumps(entry) + "\n")
 
-    def _format_output_pretty(self, output: Any) -> str:
-        """Format agent output with pretty JSON for structured data.
-
-        Detects if output is structured (dict, list, dataclass, BaseModel) and
-        formats it as pretty JSON. Otherwise returns as-is.
-
-        Args:
-            output: The output content to format
-
-        Returns:
-            Pretty-formatted string
-        """
-        if output is None:
-            return ""
-
-        output_str = str(output)
-
-        # Try to parse and format as JSON if it looks like structured data
-        try:
-            # Try to detect if this is a structured representation
-            # (dataclass repr, JSON-like, etc.)
-            import dataclasses as dc
-
-            # Check if it's a dataclass
-            if hasattr(output, "__dataclass_fields__"):
-                if dc.is_dataclass(output):
-                    # Convert dataclass to dict
-                    output_dict = dc.asdict(output)  # type: ignore
-                    return json.dumps(output_dict, indent=2, ensure_ascii=False, default=str)
-
-            # Check if it's a BaseModel
-            if hasattr(output, "model_dump"):
-                output_dict = output.model_dump()
-                return json.dumps(output_dict, indent=2, ensure_ascii=False, default=str)
-
-            # Try to parse as JSON string
-            if output_str.strip().startswith(("[", "{")):
-                parsed = json.loads(output_str)
-                return json.dumps(parsed, indent=2, ensure_ascii=False, default=str)
-
-            # Check for dataclass-like repr format
-            # e.g., "Classname(field1=value1, field2=value2)"
-            if "=" in output_str and not output_str.startswith("<"):
-                # Try to evaluate safely
-                import ast
-
-                tree = ast.parse(output_str, mode="eval")
-                if isinstance(tree.body, (ast.Call, ast.Dict, ast.List)):
-                    # This might be a structured repr
-                    return output_str  # Return as-is, we'll try eval approach below
-
-        except Exception as e:
-            logger.debug(f"Could not format as pretty JSON: {e}")
-
-        return output_str
+    def _format_output_for_display(self, output: BaseModel) -> str:
+        return output.model_dump_json(indent=2)
 
     async def run_agent_proposal(
         self,
         input_text: str,
         correction_instructions: str | None = None,
         model: Model | None = None,
-    ) -> str | None:
-        """Run agent with given input and optional correction instructions.
-
-        Args:
-            input_text: The input text to send to agent
-            correction_instructions: Optional instructions to guide AI
-            model: Optional model to override default
-
-        Returns:
-            The agent's response content as string, or None if failed
-        """
+    ) -> BaseModel | None:
         agent = dataclass_copy(self.agent, model=model or self.model)
 
         try:
@@ -1406,34 +1455,16 @@ class InteractiveDatasetGenerator:
                 full_input = input_text
 
             response = await agent.arun(full_input)
-            if response.content:
-                content = response.content
+            content = response.content
 
-                if isinstance(content, (dict, list)):
-                    return json.dumps(content, indent=2, ensure_ascii=False, default=str)
+            assert content is not None, "Agent returned None content"
+            assert isinstance(content, BaseModel), f"Expected BaseModel, got {type(content)}"
 
-                if isinstance(content, type):
-                    return str(content)
-
-                if dc.is_dataclass(content) and not isinstance(content, type):
-                    try:
-                        output_dict = dc.asdict(content)
-                        return json.dumps(output_dict, indent=2, ensure_ascii=False, default=str)
-                    except Exception:
-                        pass
-
-                model_dump_method = getattr(content, "model_dump", None)
-                if model_dump_method and callable(model_dump_method):
-                    try:
-                        output_dict = model_dump_method()
-                        return json.dumps(output_dict, indent=2, ensure_ascii=False, default=str)
-                    except Exception:
-                        pass
-
-                return str(content)
+            return content
+        except AssertionError:
             return None
         except Exception as e:
-            logger.error(f"Agent error: {e}")
+            log_error(f"Agent error: {e}")
             return None
 
     async def run(self, console: Console | None = None) -> None:
@@ -1511,7 +1542,7 @@ class InteractiveDatasetGenerator:
                 continue
 
             console.print("\n[bold]Proposed Output:[/bold]")
-            console.print(proposed)
+            console.print(self._format_output_for_display(proposed))
 
             while True:
                 action = RichPrompt.ask(
@@ -1525,6 +1556,7 @@ class InteractiveDatasetGenerator:
                     break
 
                 if action == "a":
+                    assert proposed is not None
                     observations = RichPrompt.ask(
                         "[dim]Optional observations (press Enter to skip)[/dim]",
                         default="",
@@ -1537,6 +1569,7 @@ class InteractiveDatasetGenerator:
                     break
 
                 if action == "c":
+                    assert proposed is not None
                     console.print(
                         "\n[yellow]Enter corrected output (or press Enter to accept proposed):[/yellow]"
                     )
@@ -1552,7 +1585,7 @@ class InteractiveDatasetGenerator:
                             empty_count = 0
                             lines.append(line)
 
-                    corrected = "\n".join(lines) if lines else proposed
+                    corrected: BaseModel | str = "\n".join(lines) if lines else proposed
 
                     observations = RichPrompt.ask(
                         "[dim]Optional observations (press Enter to skip)[/dim]",
@@ -1583,5 +1616,5 @@ class InteractiveDatasetGenerator:
                         continue
 
                     console.print("\n[bold]Proposed Output:[/bold]")
-                    console.print(proposed)
+                    console.print(self._format_output_for_display(proposed))
                     continue

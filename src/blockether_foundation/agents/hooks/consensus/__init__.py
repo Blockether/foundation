@@ -1,9 +1,11 @@
 """Consensus hooks for Agno agents - Multi-model agreement through structured rounds."""
 
 from blockether_foundation.agents.hooks.consensus.core import (
+    ConsensusHooksConfig,
+)
+from blockether_foundation.agents.hooks.consensus.models import (
     ConfidenceBreakdown,
     ConflictResolution,
-    ConsensusHooksConfig,
     ConsensusResult,
     ConsensusSynthesis,
     ConsideredAlternative,

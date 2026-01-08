@@ -4,7 +4,6 @@ import asyncio
 import os
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from agno.agent import Agent
 from agno.models.base import Model
@@ -13,14 +12,14 @@ from pydantic import BaseModel
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
-from rich.syntax import Syntax
 
+from blockether_foundation.agents.hooks.consensus.core import ConsensusHooksConfig
+from blockether_foundation.agents.hooks.consensus.models import JudgeCriteria, ModelConfig
 from blockether_foundation.agents.hooks.graph.agents import (
     INGESTION_AGENT,
     QUERY_AGENT,
 )
-from blockether_foundation.agents.models.zai import Zhipu
-from blockether_foundation.agents.vracef import InteractiveDatasetGenerator, TestCase
+from blockether_foundation.agents.vracef import InteractiveDatasetGenerator
 from blockether_foundation.graph.models import LLMGraphOperations, LLMGraphQueryOperations
 from blockether_foundation.utils import dataclass_copy
 
@@ -30,6 +29,28 @@ DATASET_PATH = Path(__file__).parent.parent.parent / "resources" / "optimizers" 
 
 MODEL_BASE_URL = os.getenv("BLOCKETHER_LLM_API_BASE_URL")
 MODEL_API_KEY = os.getenv("BLOCKETHER_LLM_API_KEY")
+
+
+GRAPH_JUDGE_CRITERIA = [
+    JudgeCriteria(
+        name="Entity Extraction Completeness",
+        description="All relevant entities from the input are identified and typed correctly.",
+        weight=1.0,
+        threshold=0.7,
+    ),
+    JudgeCriteria(
+        name="Relationship Accuracy",
+        description="Relationships between entities are correctly identified with proper types.",
+        weight=1.0,
+        threshold=0.7,
+    ),
+    JudgeCriteria(
+        name="Schema Adherence",
+        description="Operations follow the defined graph schema (valid entity/relationship types).",
+        weight=0.8,
+        threshold=0.8,
+    ),
+]
 
 
 class AgentType(str, Enum):
@@ -49,11 +70,37 @@ def get_output_schema_for_type(agent_type: AgentType) -> type[BaseModel]:
     return LLMGraphQueryOperations
 
 
-async def run_graph_dataset_generator(model: Model) -> None:
+def create_consensus_config(models: list[Model]) -> ConsensusHooksConfig:
+    model_configs = [
+        ModelConfig(
+            model=m,
+            name=f"Model-{i + 1}",
+            importance=1.0 / len(models),
+            perspective="Graph knowledge extraction specialist",
+        )
+        for i, m in enumerate(models)
+    ]
+    return ConsensusHooksConfig(
+        models=model_configs,
+        judge_criteria=GRAPH_JUDGE_CRITERIA,
+        triage_model=models[0],
+        skip_triage=True,
+        max_refinement_iterations=2,
+        judge_threshold=0.7,
+    )
+
+
+async def run_graph_dataset_generator(model: Model, use_consensus: bool = False) -> None:
+    consensus_config: ConsensusHooksConfig | None = None
+    if use_consensus:
+        consensus_config = create_consensus_config([model])
+
     while True:
+        consensus_status = "[green]ON[/green]" if use_consensus else "[dim]OFF[/dim]"
         console.print(
             Panel.fit(
                 "[bold cyan]Graph Agent Dataset Generator[/bold cyan]\n"
+                f"Consensus Mode: {consensus_status}\n"
                 "Create training data for INGESTION and QUERY agents.\n\n"
                 "Commands:\n"
                 "  [green]i[/green] - Create INGESTION example (text -> entities/relationships)\n"
@@ -75,7 +122,11 @@ async def run_graph_dataset_generator(model: Model) -> None:
 
         agent_type = AgentType.INGESTION if action == "i" else AgentType.QUERY
         agent = get_agent_for_type(agent_type)
-        agent = dataclass_copy(agent, model=model)
+
+        if consensus_config:
+            agent = dataclass_copy(agent, model=model, pre_hooks=[consensus_config.pre_hook()])
+        else:
+            agent = dataclass_copy(agent, model=model)
 
         prompt_text = (
             "Enter text/story to extract entities from:"
@@ -107,7 +158,8 @@ def main() -> None:
     blockether_model = OpenAIChat(
         id="gpt-4o", timeout=60000, base_url=MODEL_BASE_URL, api_key=MODEL_API_KEY
     )
-    asyncio.run(run_graph_dataset_generator(blockether_model))
+
+    asyncio.run(run_graph_dataset_generator(blockether_model, use_consensus=True))
 
 
 if __name__ == "__main__":

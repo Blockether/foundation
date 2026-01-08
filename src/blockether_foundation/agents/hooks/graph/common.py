@@ -105,11 +105,7 @@ class GraphHooksConfig:
             except Exception as e:
                 log_warning(f"Failed to load graph from file {self.file_path}: {e}")
 
-        # Create new empty graph with tantivy index path derived from file_path
-        tantivy_index_path = None
-        if self.file_path:
-            tantivy_index_path = Path(self.file_path).with_suffix(".tantivy_index")
-        return GDB(tantivy_index_path=tantivy_index_path)
+        return GDB(file_path=self.file_path)
 
     @property
     def graph(self) -> GraphDatabase:
