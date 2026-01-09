@@ -148,6 +148,7 @@ with open("transcription.txt") as f:
 import glob
 import os
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -165,6 +166,11 @@ from .hooks import TranscriptionHooksConfig
 DEFAULT_OVERLAP = 60.0
 
 
+ChunkProgressCallback = (
+    Callable[[int, int], None] | Callable[[int, int], Awaitable[None]]
+)
+
+
 async def process_audio_file(
     file_path: str,
     chunk_duration: float,
@@ -175,6 +181,7 @@ async def process_audio_file(
     save_raw_transcription: bool = False,
     save_dir: str | None = None,
     save_chunks: bool = False,
+    on_chunk_start: ChunkProgressCallback | None = None,
     **agent_kwargs: Any,
 ) -> "TranscriptionResult | None":
     """Process a single audio file with overlap-based chunking.
@@ -189,6 +196,7 @@ async def process_audio_file(
         save_raw_transcription: Whether to save raw transcriptions via hooks
         save_dir: Directory for raw transcriptions
         save_chunks: Whether to save individual chunk results to disk
+        on_chunk_start: Callback called before each chunk starts (current_chunk_index, total_chunks)
         **agent_kwargs: Additional arguments for the agent
 
     Returns:
@@ -296,7 +304,9 @@ async def process_audio_file(
                     # Format the previous transcription for context
                     # Include the last portion that corresponds to the overlap
                     prev_context_lines: list[str] = []
-                    for line in previous_result.conversation[-50:]:  # Last 50 lines for context
+                    for line in previous_result.conversation[
+                        -50:
+                    ]:  # Last 50 lines for context
                         prev_context_lines.append(
                             f'  <line speaker="{line.speaker}" '
                             f'start="{line.timerange.start:.1f}" '
@@ -325,7 +335,9 @@ async def process_audio_file(
                     )
 
                 # Process with Agent
-                response = await agent.arun(chunk_input, audio=[Audio(filepath=chunk_path)])
+                response = await agent.arun(
+                    chunk_input, audio=[Audio(filepath=chunk_path)]
+                )
 
                 if response and response.content:
                     result_model = cast(TranscriptionResult, response.content)
@@ -333,11 +345,14 @@ async def process_audio_file(
                     # Save individual chunk result if requested
                     if save_chunks:
                         chunk_output_path = os.path.join(
-                            output_dir, f"{base_name_ref}_chunk_{chunk_index + 1:03d}.json"
+                            output_dir,
+                            f"{base_name_ref}_chunk_{chunk_index + 1:03d}.json",
                         )
                         with open(chunk_output_path, "w") as f:
                             f.write(result_model.model_dump_json(indent=2))
-                        log_info(f"Saved chunk {chunk_index + 1} result to {chunk_output_path}")
+                        log_info(
+                            f"Saved chunk {chunk_index + 1} result to {chunk_output_path}"
+                        )
 
                     log_info(
                         f"Chunk {chunk_index + 1} processed successfully: "
@@ -351,7 +366,9 @@ async def process_audio_file(
                     return None
 
             except Exception as e:
-                log_error(f"Error processing chunk {chunk_index + 1} for {file_path_ref}: {e}")
+                log_error(
+                    f"Error processing chunk {chunk_index + 1} for {file_path_ref}: {e}"
+                )
                 return None
             finally:
                 # Clean up temporary chunk file
@@ -370,12 +387,22 @@ async def process_audio_file(
         previous_result: TranscriptionResult | None = None
 
         for i, chunk_data in enumerate(chunks):
+            if on_chunk_start:
+                callback_result = on_chunk_start(i + 1, len(chunks))
+                if isinstance(callback_result, Awaitable):
+                    await callback_result
+
             result = await process_chunk(
-                chunk_data, i, chunks, base_name, file_path, original_date, previous_result
+                chunk_data,
+                i,
+                chunks,
+                base_name,
+                file_path,
+                original_date,
+                previous_result,
             )
             if result is not None:
                 chunk_results.append(result)
-                # Store this result for context in next chunk
                 previous_result = result[0]
             else:
                 log_warning(f"Chunk {i + 1} failed to process, will skip")
@@ -404,7 +431,9 @@ async def process_audio_file(
 
             for i in range(1, len(chunk_results)):
                 chunk_result, chunk_start, _ = chunk_results[i]
-                chunk_with_absolute_timestamps = chunk_result.with_timestamp_offset(chunk_start)
+                chunk_with_absolute_timestamps = chunk_result.with_timestamp_offset(
+                    chunk_start
+                )
                 merged_result = await merge_transcription_results_with_agent(
                     accumulated=merged_result,
                     new_chunk=chunk_with_absolute_timestamps,
@@ -413,7 +442,9 @@ async def process_audio_file(
                     overlap_duration=overlap,
                 )
 
-            log_info("Agentic reduction complete - now deterministic cleanup can be applied")
+            log_info(
+                "Agentic reduction complete - now deterministic cleanup can be applied"
+            )
         else:
             first_result, first_start, _ = chunk_results[0]
             merged_result = first_result.with_timestamp_offset(first_start)
@@ -453,7 +484,9 @@ class Participant(BaseModel):
         description="The name of the participant. MUST be a clean name only (e.g., 'John Smith', 'Anna'). "
         "NO parentheses, NO roles, NO descriptions. Just the name and optional surname.",
     )
-    role: str = Field(..., description="The inferred role of the participant in the conversation.")
+    role: str = Field(
+        ..., description="The inferred role of the participant in the conversation."
+    )
 
 
 class Timerange(BaseModel):
@@ -494,14 +527,20 @@ class DialogueLine(BaseModel):
         ...,
         description="The name or label of the speaker (e.g., 'Speaker A', 'John'). Name preferably inferred from context. It should match the participant name",
     )
-    text: str = Field(..., description="The corrected and logically repaired spoken text.")
+    text: str = Field(
+        ..., description="The corrected and logically repaired spoken text."
+    )
     timerange: Timerange = Field(...)
 
 
 class SpeakerStatistics(BaseModel):
     name: str = Field(..., description="Name of the speaker.")
-    total_time: float = Field(..., description="Total time spoken by this speaker in seconds.")
-    message_count: int = Field(..., description="Number of dialogue lines by this speaker.")
+    total_time: float = Field(
+        ..., description="Total time spoken by this speaker in seconds."
+    )
+    message_count: int = Field(
+        ..., description="Number of dialogue lines by this speaker."
+    )
     percentage: float = Field(
         ...,
         description="Percentage of the conversation duration dominated by this speaker.",
@@ -509,8 +548,12 @@ class SpeakerStatistics(BaseModel):
 
 
 class ConversationStatistics(BaseModel):
-    total_duration: float = Field(..., description="Total duration of the conversation in seconds.")
-    most_active_speaker: str = Field(..., description="Name of the speaker who spoke the most.")
+    total_duration: float = Field(
+        ..., description="Total duration of the conversation in seconds."
+    )
+    most_active_speaker: str = Field(
+        ..., description="Name of the speaker who spoke the most."
+    )
     speaker_stats: list[SpeakerStatistics] = Field(
         ..., description="Detailed statistics per speaker."
     )
@@ -524,7 +567,8 @@ class TranscriptionResult(BaseModel):
         ..., description="The full diarized and corrected conversation."
     )
     date: str | None = Field(
-        None, description="The date of the conversation if it can be inferred. [DD-MM-YYYY]"
+        None,
+        description="The date of the conversation if it can be inferred. [DD-MM-YYYY]",
     )
 
     def to_text(self) -> str:
@@ -541,9 +585,13 @@ class TranscriptionResult(BaseModel):
         lines: list[str] = []
         lines.append("<!--")
         lines.append("  Conversation Transcription")
-        lines.append("  This file contains a diarized conversation with speaker labels,")
+        lines.append(
+            "  This file contains a diarized conversation with speaker labels,"
+        )
         lines.append("  timestamps, and participant information. Can be parsed back")
-        lines.append("  into a TranscriptionResult object using TranscriptionResult.from_text().")
+        lines.append(
+            "  into a TranscriptionResult object using TranscriptionResult.from_text()."
+        )
         lines.append("-->")
         lines.append("")
         lines.append("<transcription>")
@@ -551,12 +599,14 @@ class TranscriptionResult(BaseModel):
         # Metadata section
         lines.append("  <metadata>")
         if self.date:
-            lines.append(f'    <date>{escape(self.date)}</date>')
+            lines.append(f"    <date>{escape(self.date)}</date>")
 
         # Participants
         lines.append("    <participants>")
         for p in self.participants:
-            lines.append(f'      <participant name={quoteattr(p.name)} role={quoteattr(p.role)} />')
+            lines.append(
+                f"      <participant name={quoteattr(p.name)} role={quoteattr(p.role)} />"
+            )
         lines.append("    </participants>")
         lines.append("  </metadata>")
 
@@ -565,7 +615,7 @@ class TranscriptionResult(BaseModel):
         for line in self.conversation:
             escaped_text = escape(line.text)
             lines.append(
-                f'    <dialog_line speaker={quoteattr(line.speaker)} '
+                f"    <dialog_line speaker={quoteattr(line.speaker)} "
                 f'start="{line.timerange.start:.3f}" '
                 f'end="{line.timerange.end:.3f}">{escaped_text}</dialog_line>'
             )
@@ -591,7 +641,7 @@ class TranscriptionResult(BaseModel):
         from html import unescape
 
         # Parse date
-        date_match = re.search(r'<date>([^<]+)</date>', text)
+        date_match = re.search(r"<date>([^<]+)</date>", text)
         date: str | None = date_match.group(1) if date_match else None
 
         # Parse participants
@@ -708,7 +758,9 @@ class TranscriptionResult(BaseModel):
         for speaker, total_time in sorted(
             speaker_time.items(), key=lambda item: item[1], reverse=True
         ):
-            percentage = (total_time / total_duration * 100.0) if total_duration > 0 else 0.0
+            percentage = (
+                (total_time / total_duration * 100.0) if total_duration > 0 else 0.0
+            )
             stats.append(
                 SpeakerStatistics(
                     name=speaker,
@@ -725,7 +777,9 @@ class TranscriptionResult(BaseModel):
         )
 
 
-def merge_transcription_results(results: list[TranscriptionResult]) -> TranscriptionResult:
+def merge_transcription_results(
+    results: list[TranscriptionResult],
+) -> TranscriptionResult:
     """Merge multiple TranscriptionResult objects into a single result.
 
     Args:
@@ -762,7 +816,8 @@ def merge_transcription_results(results: list[TranscriptionResult]) -> Transcrip
                 speaker=line.speaker,
                 text=line.text,
                 timerange=Timerange(
-                    start=line.timerange.start + chunk_offset, end=line.timerange.end + chunk_offset
+                    start=line.timerange.start + chunk_offset,
+                    end=line.timerange.end + chunk_offset,
                 ),
             )
             all_conversation.append(adjusted_line)
@@ -773,7 +828,9 @@ def merge_transcription_results(results: list[TranscriptionResult]) -> Transcrip
 
         # Update offset for next chunk
         chunk_offset += chunk_duration
-        log_info(f"Chunk {i + 1}: duration={chunk_duration:.2f}s, new offset={chunk_offset:.2f}s")
+        log_info(
+            f"Chunk {i + 1}: duration={chunk_duration:.2f}s, new offset={chunk_offset:.2f}s"
+        )
 
     # Sort conversation by start time
     all_conversation.sort(key=lambda line: line.timerange.start)
@@ -1083,8 +1140,12 @@ Return a MergeDecision JSON:
 class MergeValidationResult(BaseModel):
     """Result of merge validation check."""
 
-    is_valid: bool = Field(..., description="Whether the merge result passed validation")
-    errors: list[str] = Field(default_factory=list, description="List of validation errors")
+    is_valid: bool = Field(
+        ..., description="Whether the merge result passed validation"
+    )
+    errors: list[str] = Field(
+        default_factory=list, description="List of validation errors"
+    )
 
     def __bool__(self) -> bool:
         return self.is_valid
@@ -1143,7 +1204,9 @@ def _validate_merge_result(
     if result.conversation and accumulated.conversation and new_chunk.conversation:
         # Result MUST start at or before accumulated start
         result_start = min(line.timerange.start for line in result.conversation)
-        accumulated_start = min(line.timerange.start for line in accumulated.conversation)
+        accumulated_start = min(
+            line.timerange.start for line in accumulated.conversation
+        )
 
         if result_start > accumulated_start:
             errors.append(
@@ -1271,7 +1334,9 @@ async def merge_transcription_results_with_agent(
     )
 
     # Build base input string with all context as XML
-    accumulated_xml = _transcription_result_to_xml(accumulated, "accumulated_transcription")
+    accumulated_xml = _transcription_result_to_xml(
+        accumulated, "accumulated_transcription"
+    )
     new_chunk_xml = _transcription_result_to_xml(new_chunk, "new_chunk_transcription")
 
     accumulated_len = len(accumulated.conversation)
@@ -1322,7 +1387,9 @@ Check your duplicate_indices and speaker_corrections carefully.
 
         result = apply_merge_decision(accumulated, new_chunk, decision)
 
-        validation = _validate_merge_result(result, accumulated, new_chunk, overlap_duration)
+        validation = _validate_merge_result(
+            result, accumulated, new_chunk, overlap_duration
+        )
 
         if validation.is_valid:
             if attempt > 0:
